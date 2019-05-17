@@ -169,7 +169,6 @@ bool setThreadName(std::thread::id tid, StringPiece name) {
 #endif
 }
 
-#if FOLLY_HAVE_PTHREAD
 bool setThreadName(pthread_t pid, StringPiece name) {
 #if _WIN32
   static_assert(
@@ -195,11 +194,10 @@ bool setThreadName(pthread_t pid, StringPiece name) {
   // std::thread::native_handle_type, which means we can do unsafe things to
   // extract it.
   std::thread::id id;
-  std::memcpy(&id, &pid, sizeof(id));
+  std::memcpy(static_cast<void*>(&id), &pid, sizeof(id));
   return setThreadName(id, name);
 #endif
 }
-#endif
 
 bool setThreadName(StringPiece name) {
   return setThreadName(std::this_thread::get_id(), name);

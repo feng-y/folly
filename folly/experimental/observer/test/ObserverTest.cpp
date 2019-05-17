@@ -46,9 +46,8 @@ TEST(Observer, Observable) {
 TEST(Observer, MakeObserver) {
   SimpleObservable<int> observable(42);
 
-  auto observer = makeObserver([child = observable.getObserver()]() {
-    return **child + 1;
-  });
+  auto observer = makeObserver(
+      [child = observable.getObserver()]() { return **child + 1; });
 
   EXPECT_EQ(43, **observer);
 
@@ -70,9 +69,8 @@ TEST(Observer, MakeObserver) {
 TEST(Observer, MakeObserverDiamond) {
   SimpleObservable<int> observable(42);
 
-  auto observer1 = makeObserver([child = observable.getObserver()]() {
-    return **child + 1;
-  });
+  auto observer1 = makeObserver(
+      [child = observable.getObserver()]() { return **child + 1; });
 
   auto observer2 = makeObserver([child = observable.getObserver()]() {
     return std::make_shared<int>(**child + 2);
@@ -211,7 +209,7 @@ TEST(Observer, Stress) {
 
   auto values = std::make_shared<folly::Synchronized<std::vector<int>>>();
 
-  auto observer = makeObserver([ child = observable.getObserver(), values ]() {
+  auto observer = makeObserver([child = observable.getObserver(), values]() {
     auto value = **child * 10;
     values->withWLock([&](std::vector<int>& vals) { vals.push_back(value); });
     return value;
@@ -248,6 +246,27 @@ TEST(Observer, Stress) {
       EXPECT_LE(vals[i], vals[i + 1]);
     }
   });
+}
+
+TEST(Observer, StressMultipleUpdates) {
+  SimpleObservable<int> observable1(0);
+  SimpleObservable<int> observable2(0);
+
+  auto observer = makeObserver(
+      [o1 = observable1.getObserver(), o2 = observable2.getObserver()]() {
+        return (**o1) * (**o2);
+      });
+
+  EXPECT_EQ(0, **observer);
+
+  constexpr size_t numIters = 10000;
+
+  for (size_t i = 1; i <= numIters; ++i) {
+    observable1.setValue(i);
+    observable2.setValue(i);
+    folly::observer_detail::ObserverManager::waitForAllUpdates();
+    EXPECT_EQ(i * i, **observer);
+  }
 }
 
 TEST(Observer, TLObserver) {
@@ -351,4 +370,62 @@ TEST(Observer, SetCallback) {
   EXPECT_FALSE(baton.timed_wait(std::chrono::milliseconds{100}));
   EXPECT_EQ(43, callbackValue);
   EXPECT_EQ(2, callbackCallsCount);
+}
+
+int makeObserverRecursion(int n) {
+  if (n == 0) {
+    return 0;
+  }
+  return **makeObserver([=] { return makeObserverRecursion(n - 1) + 1; });
+}
+
+TEST(Observer, NestedMakeObserver) {
+  EXPECT_EQ(32, makeObserverRecursion(32));
+}
+
+TEST(Observer, WaitForAllUpdates) {
+  folly::observer::SimpleObservable<int> observable{42};
+
+  auto observer = makeObserver([o = observable.getObserver()] {
+    std::this_thread::sleep_for(std::chrono::milliseconds{100});
+
+    return **o;
+  });
+
+  EXPECT_EQ(42, **observer);
+
+  observable.setValue(43);
+  folly::observer_detail::ObserverManager::waitForAllUpdates();
+
+  EXPECT_EQ(43, **observer);
+
+  folly::observer_detail::ObserverManager::waitForAllUpdates();
+}
+
+TEST(Observer, IgnoreUpdates) {
+  int callbackCalled = 0;
+  folly::observer::SimpleObservable<int> observable(42);
+  auto observer =
+      folly::observer::makeObserver([even = std::make_shared<bool>(true),
+                                     odd = std::make_shared<bool>(false),
+                                     observer = observable.getObserver()] {
+        if (**observer % 2 == 0) {
+          return even;
+        }
+        return odd;
+      });
+  auto callbackHandle = observer.addCallback([&](auto) { ++callbackCalled; });
+  EXPECT_EQ(1, callbackCalled);
+
+  observable.setValue(43);
+  folly::observer_detail::ObserverManager::waitForAllUpdates();
+  EXPECT_EQ(2, callbackCalled);
+
+  observable.setValue(45);
+  folly::observer_detail::ObserverManager::waitForAllUpdates();
+  EXPECT_EQ(2, callbackCalled);
+
+  observable.setValue(46);
+  folly::observer_detail::ObserverManager::waitForAllUpdates();
+  EXPECT_EQ(3, callbackCalled);
 }

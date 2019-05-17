@@ -14,8 +14,8 @@
  * limitations under the License.
  */
 
-#include <folly/futures/Future.h>
 #include <folly/futures/detail/Core.h>
+#include <folly/futures/Future.h>
 #include <folly/portability/GTest.h>
 
 using namespace folly;
@@ -25,13 +25,11 @@ TEST(Core, size) {
   struct Gold {
     typename std::aligned_storage<lambdaBufSize>::type lambdaBuf_;
     folly::Optional<Try<Unit>> result_;
-    std::function<void(Try<Unit>&&)> callback_;
-    futures::detail::FSM<futures::detail::State, futures::detail::SpinLock>
-        fsm_;
+    folly::Function<void(Try<Unit>&&)> callback_;
+    std::atomic<futures::detail::State> state_;
     std::atomic<unsigned char> attached_;
-    std::atomic<bool> active_;
     std::atomic<bool> interruptHandlerSet_;
-    folly::MicroSpinLock interruptLock_;
+    futures::detail::SpinLock interruptLock_;
     int8_t priority_;
     Executor* executor_;
     std::shared_ptr<RequestContext> context_;

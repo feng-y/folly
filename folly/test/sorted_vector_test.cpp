@@ -25,8 +25,8 @@
 #include <folly/portability/GMock.h>
 #include <folly/portability/GTest.h>
 
-using folly::sorted_vector_set;
 using folly::sorted_vector_map;
+using folly::sorted_vector_set;
 
 namespace {
 
@@ -65,10 +65,7 @@ struct CountCopyCtor {
 
   explicit CountCopyCtor(int val) : val_(val), count_(0) {}
 
-  CountCopyCtor(const CountCopyCtor& c)
-    : val_(c.val_)
-    , count_(c.count_ + 1)
-  {}
+  CountCopyCtor(const CountCopyCtor& c) : val_(c.val_), count_(c.count_ + 1) {}
 
   bool operator<(const CountCopyCtor& o) const {
     return val_ < o.val_;
@@ -100,6 +97,26 @@ struct Opaque {
 };
 
 } // namespace
+
+TEST(SortedVectorTypes, SetAssignmentInitListTest) {
+  sorted_vector_set<int> s{3, 4, 5};
+  EXPECT_THAT(s, testing::ElementsAreArray({3, 4, 5}));
+  s = {}; // empty ilist assignment
+  EXPECT_THAT(s, testing::IsEmpty());
+  s = {7, 8, 9}; // non-empty ilist assignment
+  EXPECT_THAT(s, testing::ElementsAreArray({7, 8, 9}));
+}
+
+TEST(SortedVectorTypes, MapAssignmentInitListTest) {
+  using v = std::pair<int, const char*>;
+  v p = {3, "a"}, q = {4, "b"}, r = {5, "c"};
+  sorted_vector_map<int, const char*> m{p, q, r};
+  EXPECT_THAT(m, testing::ElementsAreArray({p, q, r}));
+  m = {}; // empty ilist assignment
+  EXPECT_THAT(m, testing::IsEmpty());
+  m = {p, q, r}; // non-empty ilist assignment
+  EXPECT_THAT(m, testing::ElementsAreArray({p, q, r}));
+}
 
 TEST(SortedVectorTypes, SimpleSetTest) {
   sorted_vector_set<int> s;
@@ -166,6 +183,15 @@ TEST(SortedVectorTypes, SimpleSetTest) {
   EXPECT_TRUE(s != cpy);
   EXPECT_TRUE(s != cpy2);
   EXPECT_TRUE(cpy2 == cpy);
+
+  sorted_vector_set<int> s3 = {};
+  s3.insert({1, 2, 3});
+  s3.emplace(4);
+  EXPECT_EQ(s3.size(), 4);
+
+  sorted_vector_set<std::string> s4;
+  s4.emplace("foobar", 3);
+  EXPECT_EQ(s4.count("foo"), 1);
 }
 
 TEST(SortedVectorTypes, TransparentSetTest) {
@@ -233,7 +259,7 @@ TEST(SortedVectorTypes, BadHints) {
 }
 
 TEST(SortedVectorTypes, SimpleMapTest) {
-  sorted_vector_map<int,float> m;
+  sorted_vector_map<int, float> m;
   for (int i = 0; i < 1000; ++i) {
     m[i] = i / 1000.0;
   }
@@ -249,7 +275,7 @@ TEST(SortedVectorTypes, SimpleMapTest) {
   check_invariant(m);
   EXPECT_THROW(m.at(32), std::out_of_range);
 
-  sorted_vector_map<int,float> m2 = m;
+  sorted_vector_map<int, float> m2 = m;
   EXPECT_TRUE(m2 == m);
   EXPECT_FALSE(m2 != m);
   auto it = m2.lower_bound(1 << 20);
@@ -260,7 +286,7 @@ TEST(SortedVectorTypes, SimpleMapTest) {
   EXPECT_TRUE(m < m2);
   EXPECT_TRUE(m <= m2);
 
-  const sorted_vector_map<int,float>& cm = m;
+  const sorted_vector_map<int, float>& cm = m;
   auto range = cm.equal_range(42);
   auto lbound = cm.lower_bound(42);
   auto ubound = cm.upper_bound(42);
@@ -271,7 +297,7 @@ TEST(SortedVectorTypes, SimpleMapTest) {
   m.erase(m.lower_bound(42));
   check_invariant(m);
 
-  sorted_vector_map<int,float> m3;
+  sorted_vector_map<int, float> m3;
   m3.insert(m2.begin(), m2.end());
   check_invariant(m3);
   EXPECT_TRUE(m3 == m2);
@@ -291,6 +317,10 @@ TEST(SortedVectorTypes, SimpleMapTest) {
   // Bad insert hint.
   m.insert(m.begin() + 3, std::make_pair(1 << 15, 1.0f));
   check_invariant(m);
+
+  sorted_vector_map<int, float> m4 = {};
+  m4.insert({{1, 1.0f}, {2, 2.0f}, {1, 2.0f}});
+  EXPECT_EQ(m4.at(2), 2.0f);
 }
 
 TEST(SortedVectorTypes, TransparentMapTest) {
@@ -344,18 +374,27 @@ TEST(SortedVectorTypes, TransparentMapTest) {
 }
 
 TEST(SortedVectorTypes, Sizes) {
-  EXPECT_EQ(sizeof(sorted_vector_set<int>),
-            sizeof(std::vector<int>));
-  EXPECT_EQ(sizeof(sorted_vector_map<int,int>),
-            sizeof(std::vector<std::pair<int,int> >));
+  EXPECT_EQ(sizeof(sorted_vector_set<int>), sizeof(std::vector<int>));
+  EXPECT_EQ(
+      sizeof(sorted_vector_map<int, int>),
+      sizeof(std::vector<std::pair<int, int>>));
 
-  typedef sorted_vector_set<int,std::less<int>,
-    std::allocator<int>,OneAtATimePolicy> SetT;
-  typedef sorted_vector_map<int,int,std::less<int>,
-    std::allocator<std::pair<int,int>>,OneAtATimePolicy> MapT;
+  typedef sorted_vector_set<
+      int,
+      std::less<int>,
+      std::allocator<int>,
+      OneAtATimePolicy>
+      SetT;
+  typedef sorted_vector_map<
+      int,
+      int,
+      std::less<int>,
+      std::allocator<std::pair<int, int>>,
+      OneAtATimePolicy>
+      MapT;
 
   EXPECT_EQ(sizeof(SetT), sizeof(std::vector<int>));
-  EXPECT_EQ(sizeof(MapT), sizeof(std::vector<std::pair<int,int> >));
+  EXPECT_EQ(sizeof(MapT), sizeof(std::vector<std::pair<int, int>>));
 }
 
 TEST(SortedVectorTypes, InitializerLists) {
@@ -373,15 +412,15 @@ TEST(SortedVectorTypes, InitializerLists) {
   EXPECT_EQ(2, *forward_initialized_set.rbegin());
   EXPECT_TRUE(forward_initialized_set == backward_initialized_set);
 
-  sorted_vector_map<int,int> empty_initialized_map{};
+  sorted_vector_map<int, int> empty_initialized_map{};
   EXPECT_TRUE(empty_initialized_map.empty());
 
-  sorted_vector_map<int,int> singleton_initialized_map{{1,10}};
+  sorted_vector_map<int, int> singleton_initialized_map{{1, 10}};
   EXPECT_EQ(1, singleton_initialized_map.size());
   EXPECT_EQ(10, singleton_initialized_map[1]);
 
-  sorted_vector_map<int,int> forward_initialized_map{{1,10}, {2,20}};
-  sorted_vector_map<int,int> backward_initialized_map{{2,20}, {1,10}};
+  sorted_vector_map<int, int> forward_initialized_map{{1, 10}, {2, 20}};
+  sorted_vector_map<int, int> backward_initialized_map{{2, 20}, {1, 10}};
   EXPECT_EQ(2, forward_initialized_map.size());
   EXPECT_EQ(10, forward_initialized_map[1]);
   EXPECT_EQ(20, forward_initialized_map[2]);
@@ -389,13 +428,13 @@ TEST(SortedVectorTypes, InitializerLists) {
 }
 
 TEST(SortedVectorTypes, CustomCompare) {
-  sorted_vector_set<int,less_invert<int> > s;
+  sorted_vector_set<int, less_invert<int>> s;
   for (int i = 0; i < 200; ++i) {
     s.insert(i);
   }
   check_invariant(s);
 
-  sorted_vector_map<int,float,less_invert<int> > m;
+  sorted_vector_map<int, float, less_invert<int>> m;
   for (int i = 0; i < 200; ++i) {
     m[i] = 12.0;
   }
@@ -403,11 +442,12 @@ TEST(SortedVectorTypes, CustomCompare) {
 }
 
 TEST(SortedVectorTypes, GrowthPolicy) {
-  typedef sorted_vector_set<CountCopyCtor,
-                            std::less<CountCopyCtor>,
-                            std::allocator<CountCopyCtor>,
-                            OneAtATimePolicy>
-    SetT;
+  typedef sorted_vector_set<
+      CountCopyCtor,
+      std::less<CountCopyCtor>,
+      std::allocator<CountCopyCtor>,
+      OneAtATimePolicy>
+      SetT;
 
   SetT a;
   for (int i = 0; i < 20; ++i) {
@@ -444,7 +484,7 @@ TEST(SortedVectorTest, EmptyTest) {
   EXPECT_TRUE(emptySet.lower_bound(10) == emptySet.end());
   EXPECT_TRUE(emptySet.find(10) == emptySet.end());
 
-  sorted_vector_map<int,int> emptyMap;
+  sorted_vector_map<int, int> emptyMap;
   EXPECT_TRUE(emptyMap.lower_bound(10) == emptyMap.end());
   EXPECT_TRUE(emptyMap.find(10) == emptyMap.end());
   EXPECT_THROW(emptyMap.at(10), std::out_of_range);
@@ -488,6 +528,56 @@ TEST(SortedVectorTypes, EraseTest) {
   sorted_vector_set<int> s2(s1);
   EXPECT_EQ(0, s1.erase(0));
   EXPECT_EQ(s2, s1);
+}
+
+TEST(SortedVectorTypes, EraseTest2) {
+  sorted_vector_set<int> s;
+  for (int i = 0; i < 1000; ++i) {
+    s.insert(i);
+  }
+
+  auto it = s.lower_bound(32);
+  EXPECT_EQ(*it, 32);
+  it = s.erase(it);
+  EXPECT_NE(s.end(), it);
+  EXPECT_EQ(*it, 33);
+  it = s.erase(it, it + 5);
+  EXPECT_EQ(*it, 38);
+
+  it = s.begin();
+  while (it != s.end()) {
+    if (*it >= 5) {
+      it = s.erase(it);
+    } else {
+      it++;
+    }
+  }
+  EXPECT_EQ(it, s.end());
+  EXPECT_EQ(s.size(), 5);
+
+  sorted_vector_map<int, int> m;
+  for (int i = 0; i < 1000; ++i) {
+    m.insert(std::make_pair(i, i));
+  }
+
+  auto it2 = m.lower_bound(32);
+  EXPECT_EQ(it2->first, 32);
+  it2 = m.erase(it2);
+  EXPECT_NE(m.end(), it2);
+  EXPECT_EQ(it2->first, 33);
+  it2 = m.erase(it2, it2 + 5);
+  EXPECT_EQ(it2->first, 38);
+
+  it2 = m.begin();
+  while (it2 != m.end()) {
+    if (it2->first >= 5) {
+      it2 = m.erase(it2);
+    } else {
+      it2++;
+    }
+  }
+  EXPECT_EQ(it2, m.end());
+  EXPECT_EQ(m.size(), 5);
 }
 
 std::vector<int> extractValues(sorted_vector_set<CountCopyCtor> const& in) {
@@ -541,8 +631,7 @@ TEST(SortedVectorTypes, TestSetBulkInsertionMiddleValuesEqualDuplication) {
   EXPECT_EQ(vset.rbegin()->count_, 1);
 
   EXPECT_THAT(
-      extractValues(vset),
-      testing::ElementsAreArray({4, 6, 8, 10, 12}));
+      extractValues(vset), testing::ElementsAreArray({4, 6, 8, 10, 12}));
 }
 
 TEST(SortedVectorTypes, TestSetBulkInsertionSortMergeDups) {
@@ -574,7 +663,7 @@ TEST(SortedVectorTypes, TestSetInsertionDupsOneByOne) {
     vset.insert(elem);
   }
   check_invariant(vset);
-  EXPECT_EQ(vset.rbegin()->count_, 3);
+  EXPECT_EQ(vset.rbegin()->count_, 2);
   EXPECT_THAT(
       extractValues(vset), testing::ElementsAreArray({2, 4, 5, 6, 8, 10}));
 }
@@ -710,7 +799,11 @@ TEST(SortedVectorTypes, TestMapCreationFromVector) {
   check_invariant(vmap);
   auto contents = std::vector<std::pair<int, int>>(vmap.begin(), vmap.end());
   auto expected_contents = std::vector<std::pair<int, int>>({
-      {-1, 2}, {0, 3}, {1, 5}, {3, 1}, {5, 3},
+      {-1, 2},
+      {0, 3},
+      {1, 5},
+      {3, 1},
+      {5, 3},
   });
   EXPECT_EQ(contents, expected_contents);
 }
@@ -722,4 +815,19 @@ TEST(SortedVectorTypes, TestBulkInsertionWithDuplicatesIntoEmptySet) {
     set.insert(vec.begin(), vec.end());
   }
   EXPECT_THAT(set, testing::ElementsAreArray({0, 1}));
+}
+
+TEST(SortedVectorTypes, TestDataPointsToFirstElement) {
+  sorted_vector_set<int> set;
+  sorted_vector_map<int, int> map;
+
+  set.insert(0);
+  map[0] = 0;
+  EXPECT_EQ(set.data(), &*set.begin());
+  EXPECT_EQ(map.data(), &*map.begin());
+
+  set.insert(1);
+  map[1] = 1;
+  EXPECT_EQ(set.data(), &*set.begin());
+  EXPECT_EQ(map.data(), &*map.begin());
 }

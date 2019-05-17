@@ -13,7 +13,9 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 #include <folly/fibers/FiberManagerInternal.h>
+#include <folly/functional/Invoke.h>
 
 namespace folly {
 namespace fibers {
@@ -21,16 +23,14 @@ namespace fibers {
 namespace {
 
 template <class F, class G>
-typename std::enable_if<
-    !std::is_same<typename std::result_of<F()>::type, void>::value,
-    void>::type inline callFuncs(F&& f, G&& g, size_t id) {
+typename std::enable_if<!std::is_same<invoke_result_t<F>, void>::value, void>::
+    type inline callFuncs(F&& f, G&& g, size_t id) {
   g(id, f());
 }
 
 template <class F, class G>
-typename std::enable_if<
-    std::is_same<typename std::result_of<F()>::type, void>::value,
-    void>::type inline callFuncs(F&& f, G&& g, size_t id) {
+typename std::enable_if<std::is_same<invoke_result_t<F>, void>::value, void>::
+    type inline callFuncs(F&& f, G&& g, size_t id) {
   f();
   g(id);
 }
@@ -50,14 +50,12 @@ inline void forEach(InputIterator first, InputIterator last, F&& f) {
   Baton baton;
 
   auto taskFunc = [&tasksTodo, &e, &f, &baton](size_t id, FuncType&& func) {
-    return [
-      id,
-      &tasksTodo,
-      &e,
-      &f,
-      &baton,
-      func_ = std::forward<FuncType>(func)
-    ]() mutable {
+    return [id,
+            &tasksTodo,
+            &e,
+            &f,
+            &baton,
+            func_ = std::forward<FuncType>(func)]() mutable {
       try {
         callFuncs(std::forward<FuncType>(func_), f, id);
       } catch (...) {

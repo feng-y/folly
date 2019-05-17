@@ -16,6 +16,8 @@
 
 #pragma once
 
+#include <map>
+
 #include <folly/ThreadLocal.h>
 #include <folly/executors/GlobalExecutor.h>
 #include <folly/io/async/EventBase.h>
@@ -56,7 +58,7 @@ class IOObjectCache {
       it = p.first;
     }
     return it->second;
-  };
+  }
 
   void setFactory(TFactory factory) {
     factory_ = std::move(factory);

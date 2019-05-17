@@ -16,9 +16,12 @@
 
 #pragma once
 
+#include <cassert>
+#include <cmath>
 #include <vector>
 
 #include <folly/Range.h>
+#include <folly/Utility.h>
 
 namespace folly {
 
@@ -47,16 +50,56 @@ namespace folly {
  */
 class TDigest {
  public:
+  class Centroid {
+   public:
+    explicit Centroid(double mean = 0.0, double weight = 1.0)
+        : mean_(mean), weight_(weight) {
+      assert(weight > 0);
+    }
+
+    inline double mean() const {
+      return mean_;
+    }
+
+    inline double weight() const {
+      return weight_;
+    }
+
+    /*
+     * Adds the sum/weight to this centroid, and returns the new sum.
+     */
+    inline double add(double sum, double weight);
+
+    inline bool operator<(const Centroid& other) const {
+      return mean() < other.mean();
+    }
+
+   private:
+    double mean_;
+    double weight_;
+  };
+
   explicit TDigest(size_t maxSize = 100)
-      : maxSize_(maxSize), sum_(0.0), count_(0.0) {
-    centroids_.reserve(maxSize);
-  }
+      : maxSize_(maxSize), sum_(0.0), count_(0.0), max_(NAN), min_(NAN) {}
+
+  explicit TDigest(
+      std::vector<Centroid> centroids,
+      double sum,
+      double count,
+      double max_val,
+      double min_val,
+      size_t maxSize = 100);
 
   /*
    * Returns a new TDigest constructed with values merged from the current
    * digest and the given sortedValues.
    */
-  TDigest merge(Range<const double*> sortedValues) const;
+  TDigest merge(sorted_equivalent_t, Range<const double*> sortedValues) const;
+  /*
+   * Returns a new TDigest constructed with values merged from the current
+   * digest and the given unsortedValues.
+   */
+  TDigest merge(Range<const double*> unsortedValues) const;
 
   /*
    * Returns a new TDigest constructed with values merged from the given
@@ -81,35 +124,33 @@ class TDigest {
     return count_;
   }
 
+  double min() const {
+    return min_;
+  }
+
+  double max() const {
+    return max_;
+  }
+
+  bool empty() const {
+    return centroids_.empty();
+  }
+
+  const std::vector<Centroid>& getCentroids() const {
+    return centroids_;
+  }
+
+  size_t maxSize() const {
+    return maxSize_;
+  }
+
  private:
-  struct Centroid {
-   public:
-    explicit Centroid(double mean = 0.0, double weight = 1.0)
-        : mean_(mean), weight_(weight) {}
-
-    inline double mean() const {
-      return mean_;
-    }
-
-    inline double weight() const {
-      return weight_;
-    }
-
-    inline void add(const Centroid& other);
-
-    inline bool operator<(const Centroid& other) const {
-      return mean() < other.mean();
-    }
-
-   private:
-    double mean_;
-    double weight_;
-  };
-
   std::vector<Centroid> centroids_;
   size_t maxSize_;
   double sum_;
   double count_;
+  double max_;
+  double min_;
 };
 
 } // namespace folly

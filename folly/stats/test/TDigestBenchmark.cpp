@@ -46,7 +46,7 @@ void merge(unsigned int iters, size_t maxSize, size_t bufSize) {
   }
 
   for (const auto& buffer : buffers) {
-    digest = digest.merge(buffer);
+    digest = digest.merge(folly::sorted_equivalent, buffer);
   }
 }
 
@@ -64,7 +64,6 @@ void mergeDigests(unsigned int iters, size_t maxSize, size_t nDigests) {
       for (size_t j = 0; j < maxSize; ++j) {
         buffer.push_back(distribution(generator));
       }
-      std::sort(buffer.begin(), buffer.end());
       digests.push_back(digest.merge(buffer));
     }
   }
@@ -95,7 +94,6 @@ void estimateQuantile(unsigned int iters, size_t maxSize, double quantile) {
       for (size_t j = 0; j < bufSize; ++j) {
         buffer.push_back(values[i * bufSize + j]);
       }
-      std::sort(buffer.begin(), buffer.end());
       digest = digest.merge(buffer);
     }
   }
@@ -112,7 +110,9 @@ BENCHMARK_RELATIVE_NAMED_PARAM(merge, 1000x1, 1000, 1000)
 BENCHMARK_RELATIVE_NAMED_PARAM(merge, 1000x5, 1000, 5000)
 BENCHMARK_RELATIVE_NAMED_PARAM(merge, 1000x10, 1000, 10000)
 BENCHMARK_DRAW_LINE();
-BENCHMARK_NAMED_PARAM(mergeDigests, 100x60, 100, 60)
+BENCHMARK_NAMED_PARAM(mergeDigests, 100x10, 100, 10)
+BENCHMARK_RELATIVE_NAMED_PARAM(mergeDigests, 100x30, 100, 30)
+BENCHMARK_RELATIVE_NAMED_PARAM(mergeDigests, 100x60, 100, 60)
 BENCHMARK_RELATIVE_NAMED_PARAM(mergeDigests, 1000x60, 1000, 60)
 BENCHMARK_DRAW_LINE();
 BENCHMARK_NAMED_PARAM(estimateQuantile, 100x1_p001, 100, 0.001)
@@ -136,31 +136,33 @@ BENCHMARK_RELATIVE_NAMED_PARAM(estimateQuantile, 1000_p999, 1000, 0.999)
  * ============================================================================
  * folly/stats/test/TDigestBenchmark.cpp           relative  time/iter  iters/s
  * ============================================================================
- * merge(100x1)                                                 4.11us  243.60K
- * merge(100x5)                                      52.31%     7.85us  127.43K
- * merge(100x10)                                     30.13%    13.63us   73.39K
- * merge(1000x1)                                     12.26%    33.49us   29.86K
- * merge(1000x5)                                      6.23%    65.94us   15.17K
- * merge(1000x10)                                     3.64%   112.76us    8.87K
+ * merge(100x1)                                                 2.30us  434.11K
+ * merge(100x5)                                      65.52%     3.52us  284.42K
+ * merge(100x10)                                     48.66%     4.73us  211.26K
+ * merge(1000x1)                                      9.37%    24.59us   40.67K
+ * merge(1000x5)                                      6.22%    37.03us   27.00K
+ * merge(1000x10)                                     4.60%    50.03us   19.99K
  * ----------------------------------------------------------------------------
- * mergeDigests(100x60)                                       381.44us    2.62K
- * mergeDigests(1000x60)                              9.22%     4.14ms   241.73
+ * mergeDigests(100x10)                                        21.50us   46.52K
+ * mergeDigests(100x30)                              20.03%   107.34us    9.32K
+ * mergeDigests(100x60)                               8.66%   248.29us    4.03K
+ * mergeDigests(1000x60)                              0.78%     2.75ms   363.17
  * ----------------------------------------------------------------------------
- * estimateQuantile(100x1_p001)                                 8.48ns  117.96M
- * estimateQuantile(100_p01)                         57.14%    14.84ns   67.41M
- * estimateQuantile(100_p25)                         11.95%    70.96ns   14.09M
- * estimateQuantile(100_p50)                          9.19%    92.27ns   10.84M
- * estimateQuantile(100_p75)                         12.03%    70.49ns   14.19M
- * estimateQuantile(100_p99)                         65.68%    12.91ns   77.47M
- * estimateQuantile(100_p999)                        97.06%     8.73ns  114.49M
+ * estimateQuantile(100x1_p001)                                 7.34ns  136.21M
+ * estimateQuantile(100_p01)                         68.10%    10.78ns   92.76M
+ * estimateQuantile(100_p25)                         11.51%    63.77ns   15.68M
+ * estimateQuantile(100_p50)                          7.98%    92.03ns   10.87M
+ * estimateQuantile(100_p75)                         14.99%    48.98ns   20.42M
+ * estimateQuantile(100_p99)                         77.57%     9.46ns  105.65M
+ * estimateQuantile(100_p999)                       130.42%     5.63ns  177.64M
  * ----------------------------------------------------------------------------
- * estimateQuantile(1000_p001)                       23.30%    36.38ns   27.49M
- * estimateQuantile(1000_p01)                         6.46%   131.30ns    7.62M
- * estimateQuantile(1000_p25)                         1.51%   560.08ns    1.79M
- * estimateQuantile(1000_p50)                         1.08%   781.97ns    1.28M
- * estimateQuantile(1000_p75)                         1.49%   567.33ns    1.76M
- * estimateQuantile(1000_p99)                         6.42%   131.99ns    7.58M
- * estimateQuantile(1000_p999)                       27.09%    31.30ns   31.95M
+ * estimateQuantile(1000_p001)                       16.69%    43.99ns   22.73M
+ * estimateQuantile(1000_p01)                         6.08%   120.74ns    8.28M
+ * estimateQuantile(1000_p25)                         1.43%   513.01ns    1.95M
+ * estimateQuantile(1000_p50)                         1.06%   693.28ns    1.44M
+ * estimateQuantile(1000_p75)                         1.66%   442.20ns    2.26M
+ * estimateQuantile(1000_p99)                         7.12%   103.08ns    9.70M
+ * estimateQuantile(1000_p999)                       22.98%    31.94ns   31.30M
  * ============================================================================
  */
 

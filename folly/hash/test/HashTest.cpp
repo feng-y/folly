@@ -18,6 +18,7 @@
 
 #include <stdint.h>
 
+#include <random>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -223,6 +224,151 @@ TEST(Hash, integral_types) {
   EXPECT_EQ(setSize, hashes.size());
 }
 
+namespace {
+enum class TestEnum {
+  MIN = 0,
+  ITEM = 1,
+  MAX = 2,
+};
+
+enum class TestBigEnum : uint64_t {
+  ITEM = 1,
+};
+
+struct TestStruct {};
+} // namespace
+
+namespace std {
+template <>
+struct hash<TestEnum> {
+  std::size_t operator()(TestEnum const& e) const noexcept {
+    return hash<int>()(static_cast<int>(e));
+  }
+};
+
+template <>
+struct hash<TestStruct> {
+  std::size_t operator()(TestStruct const&) const noexcept {
+    return 0;
+  }
+};
+} // namespace std
+
+namespace {
+thread_local size_t allocatedMemorySize{0};
+
+template <class T>
+class TestAlloc {
+ public:
+  using Alloc = std::allocator<T>;
+  using value_type = typename Alloc::value_type;
+
+  using pointer = typename Alloc::pointer;
+  using const_pointer = typename Alloc::const_pointer;
+  using reference = typename Alloc::reference;
+  using const_reference = typename Alloc::const_reference;
+  using size_type = typename Alloc::size_type;
+
+  using propagate_on_container_swap = std::true_type;
+  using propagate_on_container_copy_assignment = std::true_type;
+  using propagate_on_container_move_assignment = std::true_type;
+
+  TestAlloc() {}
+
+  template <class T2>
+  TestAlloc(TestAlloc<T2> const& other) noexcept : a_(other.a_) {}
+
+  template <class T2>
+  TestAlloc& operator=(TestAlloc<T2> const& other) noexcept {
+    a_ = other.a_;
+    return *this;
+  }
+
+  template <class T2>
+  TestAlloc(TestAlloc<T2>&& other) noexcept : a_(std::move(other.a_)) {}
+
+  template <class T2>
+  TestAlloc& operator=(TestAlloc<T2>&& other) noexcept {
+    a_ = std::move(other.a_);
+    return *this;
+  }
+
+  static size_t getAllocatedMemorySize() {
+    return allocatedMemorySize;
+  }
+
+  static void resetTracking() {
+    allocatedMemorySize = 0;
+  }
+
+  T* allocate(size_t n) {
+    allocatedMemorySize += n * sizeof(T);
+    return a_.allocate(n);
+  }
+  void deallocate(T* p, size_t n) {
+    allocatedMemorySize -= n * sizeof(T);
+    a_.deallocate(p, n);
+  }
+
+ private:
+  std::allocator<T> a_;
+
+  template <class U>
+  friend class TestAlloc;
+};
+
+template <class T1, class T2>
+bool operator==(TestAlloc<T1> const&, TestAlloc<T2> const&) {
+  return true;
+}
+
+template <class T1, class T2>
+bool operator!=(TestAlloc<T1> const&, TestAlloc<T2> const&) {
+  return false;
+}
+
+template <class M, class A>
+std::vector<size_t> getStats(size_t iter) {
+  std::vector<size_t> ret;
+  ret.reserve(iter);
+  A::resetTracking();
+  M m;
+  ret.push_back(A::getAllocatedMemorySize());
+  for (size_t i = 1; i < iter; ++i) {
+    m.insert(std::make_pair(
+        folly::to<typename M::key_type>(i), typename M::mapped_type{}));
+    ret.push_back(A::getAllocatedMemorySize());
+  }
+  return ret;
+}
+
+template <typename K, typename V, typename H>
+void testNoCachedHashCode() {
+  using A = TestAlloc<std::pair<const K, V>>;
+  using M = std::unordered_map<K, V, std::hash<K>, std::equal_to<K>, A>;
+  using MActual = std::unordered_map<K, V, H, std::equal_to<K>, A>;
+  constexpr int kIter = 10;
+  auto expected = getStats<M, A>(kIter);
+  auto actual = getStats<MActual, A>(kIter);
+  ASSERT_EQ(expected.size(), actual.size());
+  for (size_t i = 0; i < expected.size(); ++i) {
+    ASSERT_EQ(expected[i], actual[i]);
+  }
+}
+} // namespace
+
+TEST(Hash, noCachedHashCode) {
+  testNoCachedHashCode<bool, char, folly::hasher<bool>>();
+  testNoCachedHashCode<int, char, folly::hasher<int>>();
+  testNoCachedHashCode<double, char, folly::hasher<double>>();
+  testNoCachedHashCode<TestEnum, char, folly::hasher<TestEnum>>();
+
+  testNoCachedHashCode<bool, std::string, folly::Hash>();
+  testNoCachedHashCode<int, std::string, folly::Hash>();
+  testNoCachedHashCode<double, std::string, folly::Hash>();
+  testNoCachedHashCode<TestEnum, std::string, folly::Hash>();
+}
+
 TEST(Hash, integer_conversion) {
   folly::hasher<uint64_t> h;
   uint64_t k = 10;
@@ -264,14 +410,14 @@ TEST(Hash, float_types) {
 // Not a full hasher since only handles one type
 class TestHasher {
  public:
-  static size_t hash(const std::pair<int, int>& p) {
+  size_t operator()(const std::pair<int, int>& p) const {
     return p.first + p.second;
   }
 };
 
 template <typename T, typename... Ts>
 size_t hash_combine_test(const T& t, const Ts&... ts) {
-  return hash_combine_generic<TestHasher>(t, ts...);
+  return hash_combine_generic(TestHasher{}, t, ts...);
 }
 
 TEST(Hash, pair) {
@@ -303,6 +449,7 @@ TEST(Hash, pair) {
 }
 
 TEST(Hash, hash_combine) {
+  EXPECT_TRUE(noexcept(hash_combine(1, 2)));
   EXPECT_NE(hash_combine(1, 2), hash_combine(2, 1));
 }
 
@@ -346,6 +493,15 @@ TEST(Hash, std_tuple) {
   std::unordered_map<tuple3, std::string> m;
   m[t] = "bar";
   EXPECT_EQ("bar", m[t]);
+}
+
+TEST(Hash, std_empty_tuple) {
+  std::unordered_map<std::tuple<>, std::string, folly::Hash> m;
+  m[{}] = "foo";
+  EXPECT_EQ(m[{}], "foo");
+
+  folly::hasher<std::tuple<>> h;
+  EXPECT_EQ(h({}), 0);
 }
 
 TEST(Hash, enum_type) {
@@ -399,6 +555,36 @@ TEST(Hash, hash_range) {
   EXPECT_EQ(hash_vector<int32_t>({1, 2}), hash_vector<int16_t>({1, 2}));
   EXPECT_NE(hash_vector<int>({2, 1}), hash_vector<int>({1, 2}));
   EXPECT_EQ(hash_vector<int>({}), hash_vector<float>({}));
+}
+
+TEST(Hash, commutative_hash_combine) {
+  EXPECT_EQ(
+      commutative_hash_combine_value_generic(
+          folly::Hash{}(12345ul), folly::Hash{}, 6789ul),
+      commutative_hash_combine_value_generic(
+          folly::Hash{}(6789ul), folly::Hash{}, 12345ul));
+
+  std::vector<int> v = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10};
+  std::random_device rd;
+  std::mt19937 g(rd());
+  auto h = commutative_hash_combine_range(v.begin(), v.end());
+  for (int i = 0; i < 100; i++) {
+    std::shuffle(v.begin(), v.end(), g);
+    EXPECT_EQ(h, commutative_hash_combine_range(v.begin(), v.end()));
+  }
+  EXPECT_NE(
+      h,
+      commutative_hash_combine_range_generic(
+          /* seed = */ 0xdeadbeef, folly::Hash{}, v.begin(), v.end()));
+  EXPECT_NE(
+      h, commutative_hash_combine_range(v.begin(), v.begin() + (v.size() - 1)));
+
+  EXPECT_EQ(h, commutative_hash_combine(1, 2, 3, 4, 5, 6, 7, 8, 9, 10));
+  EXPECT_EQ(h, commutative_hash_combine(10, 2, 3, 4, 5, 6, 7, 8, 9, 1));
+
+  EXPECT_EQ(
+      commutative_hash_combine(12345, 6789),
+      commutative_hash_combine(6789, 12345));
 }
 
 TEST(Hash, std_tuple_different_hash) {
@@ -481,33 +667,9 @@ INSTANTIATE_TEST_CASE_P(
         FNVTestParam{"http://norvig.com/21-days.html", // 136
                      0x07aaa640476e0b9a}));
 
-namespace {
-enum class TestEnum {
-  MIN = 0,
-  ITEM = 1,
-  MAX = 2,
-};
-
-enum class TestBigEnum : uint64_t {
-  ITEM = 1,
-};
-
-struct TestStruct {};
-} // namespace
-
-namespace std {
-template <>
-struct hash<TestEnum> : hash<int> {};
-
-template <>
-struct hash<TestStruct> {
-  std::size_t operator()(TestStruct const&) const {
-    return 0;
-  }
-};
-} // namespace std
-
 //////// static checks
+
+static constexpr bool k32Bit = sizeof(std::size_t) == 4;
 
 static_assert(!folly::IsAvalanchingHasher<std::hash<int>, int>::value, "");
 static_assert(
@@ -528,6 +690,15 @@ static_assert(
     "");
 static_assert(
     !folly::IsAvalanchingHasher<std::hash<TestStruct>, TestStruct>::value,
+    "");
+
+static_assert(
+    !folly::IsAvalanchingHasher<folly::transparent<std::hash<int>>, int>::value,
+    "");
+static_assert(
+    folly::IsAvalanchingHasher<
+        folly::transparent<std::hash<std::string>>,
+        std::string>::value,
     "");
 
 // these come from folly/hash/Hash.h
@@ -556,38 +727,57 @@ static_assert(
         std::tuple<int, int, int>>::value,
     "");
 
-static_assert(!folly::IsAvalanchingHasher<folly::Hash, uint8_t>::value, "");
-static_assert(!folly::IsAvalanchingHasher<folly::Hash, char>::value, "");
-static_assert(!folly::IsAvalanchingHasher<folly::Hash, uint16_t>::value, "");
-static_assert(!folly::IsAvalanchingHasher<folly::Hash, int16_t>::value, "");
-static_assert(!folly::IsAvalanchingHasher<folly::Hash, uint32_t>::value, "");
-static_assert(!folly::IsAvalanchingHasher<folly::Hash, int32_t>::value, "");
+static_assert(
+    k32Bit == folly::IsAvalanchingHasher<folly::Hash, uint8_t>::value,
+    "");
+static_assert(
+    k32Bit == folly::IsAvalanchingHasher<folly::Hash, char>::value,
+    "");
+static_assert(
+    k32Bit == folly::IsAvalanchingHasher<folly::Hash, uint16_t>::value,
+    "");
+static_assert(
+    k32Bit == folly::IsAvalanchingHasher<folly::Hash, int16_t>::value,
+    "");
+static_assert(
+    k32Bit == folly::IsAvalanchingHasher<folly::Hash, uint32_t>::value,
+    "");
+static_assert(
+    k32Bit == folly::IsAvalanchingHasher<folly::Hash, int32_t>::value,
+    "");
 static_assert(folly::IsAvalanchingHasher<folly::Hash, uint64_t>::value, "");
 static_assert(folly::IsAvalanchingHasher<folly::Hash, int64_t>::value, "");
 static_assert(
     folly::IsAvalanchingHasher<folly::Hash, folly::StringPiece>::value,
     "");
 static_assert(folly::IsAvalanchingHasher<folly::Hash, std::string>::value, "");
-static_assert(!folly::IsAvalanchingHasher<folly::Hash, TestEnum>::value, "");
+static_assert(
+    k32Bit == folly::IsAvalanchingHasher<folly::Hash, TestEnum>::value,
+    "");
 static_assert(folly::IsAvalanchingHasher<folly::Hash, TestBigEnum>::value, "");
 
 static_assert(
-    !folly::IsAvalanchingHasher<folly::hasher<uint8_t>, uint8_t>::value,
+    k32Bit ==
+        folly::IsAvalanchingHasher<folly::hasher<uint8_t>, uint8_t>::value,
     "");
 static_assert(
-    !folly::IsAvalanchingHasher<folly::hasher<char>, char>::value,
+    k32Bit == folly::IsAvalanchingHasher<folly::hasher<char>, char>::value,
     "");
 static_assert(
-    !folly::IsAvalanchingHasher<folly::hasher<uint16_t>, uint16_t>::value,
+    k32Bit ==
+        folly::IsAvalanchingHasher<folly::hasher<uint16_t>, uint16_t>::value,
     "");
 static_assert(
-    !folly::IsAvalanchingHasher<folly::hasher<int16_t>, int16_t>::value,
+    k32Bit ==
+        folly::IsAvalanchingHasher<folly::hasher<int16_t>, int16_t>::value,
     "");
 static_assert(
-    !folly::IsAvalanchingHasher<folly::hasher<uint32_t>, uint32_t>::value,
+    k32Bit ==
+        folly::IsAvalanchingHasher<folly::hasher<uint32_t>, uint32_t>::value,
     "");
 static_assert(
-    !folly::IsAvalanchingHasher<folly::hasher<int32_t>, int32_t>::value,
+    k32Bit ==
+        folly::IsAvalanchingHasher<folly::hasher<int32_t>, int32_t>::value,
     "");
 static_assert(
     folly::IsAvalanchingHasher<folly::hasher<uint64_t>, uint64_t>::value,
@@ -608,6 +798,16 @@ static_assert(
     folly::IsAvalanchingHasher<folly::hasher<folly::StringPiece>, std::string>::
         value,
     "");
+static_assert(
+    folly::IsAvalanchingHasher<
+        folly::hasher<folly::StringPiece>,
+        folly::StringPiece>::value,
+    "");
+static_assert(
+    folly::IsAvalanchingHasher<
+        folly::transparent<folly::hasher<folly::StringPiece>>,
+        folly::StringPiece>::value,
+    "");
 
 static_assert(
     folly::IsAvalanchingHasher<folly::hasher<std::string>, std::string>::value,
@@ -618,9 +818,10 @@ static_assert(
         std::pair<int, int>>::value,
     "");
 static_assert(
-    !folly::IsAvalanchingHasher<
-        folly::hasher<std::tuple<int>>,
-        std::tuple<int>>::value,
+    k32Bit ==
+        folly::IsAvalanchingHasher<
+            folly::hasher<std::tuple<int>>,
+            std::tuple<int>>::value,
     "");
 static_assert(
     folly::IsAvalanchingHasher<
@@ -638,7 +839,8 @@ static_assert(
         std::tuple<int, int, int>>::value,
     "");
 static_assert(
-    !folly::IsAvalanchingHasher<folly::hasher<TestEnum>, TestEnum>::value,
+    k32Bit ==
+        folly::IsAvalanchingHasher<folly::hasher<TestEnum>, TestEnum>::value,
     "");
 static_assert(
     folly::IsAvalanchingHasher<folly::hasher<TestBigEnum>, TestBigEnum>::value,

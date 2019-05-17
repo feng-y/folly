@@ -17,10 +17,13 @@
 #pragma once
 
 #include <cstddef>
+#include <cstring>
+#include <limits>
+#include <memory>
 #include <ostream>
 #include <vector>
 
-#include <folly/Demangle.h>
+#include <folly/Function.h>
 #include <folly/container/detail/F14Policy.h>
 #include <folly/container/detail/F14Table.h>
 
@@ -44,8 +47,8 @@ std::ostream& operator<<(std::ostream& xo, Histo const& histo) {
     }
     partial += histo.data[i];
     if (histo.data[i] > 0) {
-      xo << i << ": " << histo.data[i] << " (" << (partial * 100.0 / sum)
-         << "%)";
+      xo << i << ": " << histo.data[i] << " ("
+         << (static_cast<double>(partial) * 100.0 / sum) << "%)";
     }
   }
   xo << "]";
@@ -70,7 +73,7 @@ double expectedProbe(std::vector<std::size_t> const& probeLengths) {
     sum += i * probeLengths[i];
     count += probeLengths[i];
   }
-  return static_cast<double>(sum) / count;
+  return static_cast<double>(sum) / static_cast<double>(count);
 }
 
 // Returns i such that probeLengths elements 0 to i (inclusive) account
@@ -124,6 +127,7 @@ struct Counts {
   uint64_t copyAssign{0};
   uint64_t moveAssign{0};
   uint64_t defaultConstruct{0};
+  uint64_t destroyed{0};
 
   explicit Counts(
       uint64_t copConstr = 0,
@@ -132,15 +136,23 @@ struct Counts {
       uint64_t movConv = 0,
       uint64_t copAssign = 0,
       uint64_t movAssign = 0,
-      uint64_t def = 0)
+      uint64_t def = 0,
+      uint64_t destr = 0)
       : copyConstruct{copConstr},
         moveConstruct{movConstr},
         copyConvert{copConv},
         moveConvert{movConv},
         copyAssign{copAssign},
         moveAssign{movAssign},
-        defaultConstruct{def} {}
+        defaultConstruct{def},
+        destroyed{destr} {}
 
+  int64_t liveCount() const {
+    return copyConstruct + moveConstruct + copyConvert + moveConvert +
+        defaultConstruct - destroyed;
+  }
+
+  // dist ignores destroyed count
   uint64_t dist(Counts const& rhs) const {
     auto d = [](uint64_t x, uint64_t y) { return (x - y) * (x - y); };
     return d(copyConstruct, rhs.copyConstruct) +
@@ -151,11 +163,7 @@ struct Counts {
   }
 
   bool operator==(Counts const& rhs) const {
-    return copyConstruct == rhs.copyConstruct &&
-        moveConstruct == rhs.moveConstruct && copyConvert == rhs.copyConvert &&
-        moveConvert == rhs.moveConvert && copyAssign == rhs.copyAssign &&
-        moveAssign == rhs.moveAssign &&
-        defaultConstruct == rhs.defaultConstruct;
+    return dist(rhs) == 0 && destroyed == rhs.destroyed;
   }
   bool operator!=(Counts const& rhs) const {
     return !(*this == rhs);
@@ -193,6 +201,10 @@ std::ostream& operator<<(std::ostream& xo, Counts const& counts) {
     xo << glue << counts.defaultConstruct << " default construct";
     glue = ", ";
   }
+  if (counts.destroyed > 0) {
+    xo << glue << counts.destroyed << " destroyed";
+    glue = ", ";
+  }
   xo << "]";
   return xo;
 }
@@ -211,9 +223,13 @@ struct Tracked {
     sumCounts.defaultConstruct++;
     counts.defaultConstruct++;
   }
-  /* implicit */ Tracked(uint64_t val) : val_{val} {
+  /* implicit */ Tracked(uint64_t const& val) : val_{val} {
     sumCounts.copyConvert++;
     counts.copyConvert++;
+  }
+  /* implicit */ Tracked(uint64_t&& val) : val_{val} {
+    sumCounts.moveConvert++;
+    counts.moveConvert++;
   }
   Tracked(Tracked const& rhs) : val_{rhs.val_} {
     sumCounts.copyConstruct++;
@@ -248,11 +264,45 @@ struct Tracked {
     counts.moveConvert++;
   }
 
+  ~Tracked() {
+    sumCounts.destroyed++;
+    counts.destroyed++;
+  }
+
   bool operator==(Tracked const& rhs) const {
     return val_ == rhs.val_;
   }
   bool operator!=(Tracked const& rhs) const {
     return !(*this == rhs);
+  }
+};
+
+template <int Tag>
+struct TransparentTrackedHash {
+  using is_transparent = void;
+
+  size_t operator()(Tracked<Tag> const& tracked) const {
+    return tracked.val_ ^ Tag;
+  }
+  size_t operator()(uint64_t v) const {
+    return v ^ Tag;
+  }
+};
+
+template <int Tag>
+struct TransparentTrackedEqual {
+  using is_transparent = void;
+
+  uint64_t unwrap(Tracked<Tag> const& v) const {
+    return v.val_;
+  }
+  uint64_t unwrap(uint64_t v) const {
+    return v;
+  }
+
+  template <typename A, typename B>
+  bool operator()(A const& lhs, B const& rhs) const {
+    return unwrap(lhs) == unwrap(rhs);
   }
 };
 
@@ -269,7 +319,21 @@ thread_local Counts Tracked<4>::counts{};
 template <>
 thread_local Counts Tracked<5>::counts{};
 
-void resetTracking() {
+thread_local size_t testAllocatedMemorySize{0};
+thread_local size_t testAllocatedBlockCount{0};
+thread_local size_t testAllocationCount{0};
+thread_local size_t testAllocationMaxCount{
+    std::numeric_limits<std::size_t>::max()};
+
+inline void limitTestAllocations(std::size_t allocationsBeforeException = 0) {
+  testAllocationMaxCount = testAllocationCount + allocationsBeforeException;
+}
+
+inline void unlimitTestAllocations() {
+  testAllocationMaxCount = std::numeric_limits<std::size_t>::max();
+}
+
+inline void resetTracking() {
   sumCounts = Counts{};
   Tracked<0>::counts = Counts{};
   Tracked<1>::counts = Counts{};
@@ -277,39 +341,11 @@ void resetTracking() {
   Tracked<3>::counts = Counts{};
   Tracked<4>::counts = Counts{};
   Tracked<5>::counts = Counts{};
+  testAllocatedMemorySize = 0;
+  testAllocatedBlockCount = 0;
+  testAllocationCount = 0;
+  testAllocationMaxCount = std::numeric_limits<std::size_t>::max();
 }
-
-std::ostream& operator<<(std::ostream& xo, F14TableStats const& stats) {
-  using f14::Histo;
-
-  xo << "{ " << std::endl;
-  xo << "  policy: " << folly::demangle(stats.policy) << std::endl;
-  xo << "  size: " << stats.size << std::endl;
-  xo << "  valueSize: " << stats.valueSize << std::endl;
-  xo << "  bucketCount: " << stats.bucketCount << std::endl;
-  xo << "  chunkCount: " << stats.chunkCount << std::endl;
-  xo << "  chunkOccupancyHisto" << Histo{stats.chunkOccupancyHisto}
-     << std::endl;
-  xo << "  chunkOutboundOverflowHisto"
-     << Histo{stats.chunkOutboundOverflowHisto} << std::endl;
-  xo << "  chunkHostedOverflowHisto" << Histo{stats.chunkHostedOverflowHisto}
-     << std::endl;
-  xo << "  keyProbeLengthHisto" << Histo{stats.keyProbeLengthHisto}
-     << std::endl;
-  xo << "  missProbeLengthHisto" << Histo{stats.missProbeLengthHisto}
-     << std::endl;
-  xo << "  totalBytes: " << stats.totalBytes << std::endl;
-  xo << "  valueBytes: " << (stats.size * stats.valueSize) << std::endl;
-  xo << "  overheadBytes: " << stats.overheadBytes << std::endl;
-  if (stats.size > 0) {
-    xo << "  overheadBytesPerKey: " << (stats.overheadBytes * 1.0 / stats.size)
-       << std::endl;
-  }
-  xo << "}";
-  return xo;
-}
-
-thread_local size_t allocatedMemorySize{0};
 
 template <class T>
 class SwapTrackingAlloc {
@@ -351,21 +387,28 @@ class SwapTrackingAlloc {
     return *this;
   }
 
-  static size_t getAllocatedMemorySize() {
-    return allocatedMemorySize;
-  }
-
-  static void resetTracking() {
-    allocatedMemorySize = 0;
-  }
-
   T* allocate(size_t n) {
-    allocatedMemorySize += n * sizeof(T);
-    return a_.allocate(n);
+    if (testAllocationCount >= testAllocationMaxCount) {
+      throw std::bad_alloc();
+    }
+    ++testAllocationCount;
+    testAllocatedMemorySize += n * sizeof(T);
+    ++testAllocatedBlockCount;
+    std::size_t extra =
+        std::max<std::size_t>(1, sizeof(std::size_t) / sizeof(T));
+    T* p = a_.allocate(extra + n);
+    std::memcpy(p, &n, sizeof(std::size_t));
+    return p + extra;
   }
   void deallocate(T* p, size_t n) {
-    allocatedMemorySize -= n * sizeof(T);
-    a_.deallocate(p, n);
+    testAllocatedMemorySize -= n * sizeof(T);
+    --testAllocatedBlockCount;
+    std::size_t extra =
+        std::max<std::size_t>(1, sizeof(std::size_t) / sizeof(T));
+    std::size_t check;
+    std::memcpy(&check, p - extra, sizeof(std::size_t));
+    FOLLY_SAFE_CHECK(check == n, "");
+    a_.deallocate(p - extra, n + extra);
   }
 
  private:
@@ -393,6 +436,149 @@ template <class T1, class T2>
 bool operator!=(SwapTrackingAlloc<T1> const&, SwapTrackingAlloc<T2> const&) {
   return false;
 }
+
+std::ostream& operator<<(std::ostream& xo, F14TableStats const& stats) {
+  using f14::Histo;
+
+  xo << "{ " << std::endl;
+  xo << "  policy: " << stats.policy << std::endl;
+  xo << "  size: " << stats.size << std::endl;
+  xo << "  valueSize: " << stats.valueSize << std::endl;
+  xo << "  bucketCount: " << stats.bucketCount << std::endl;
+  xo << "  chunkCount: " << stats.chunkCount << std::endl;
+  xo << "  chunkOccupancyHisto" << Histo{stats.chunkOccupancyHisto}
+     << std::endl;
+  xo << "  chunkOutboundOverflowHisto"
+     << Histo{stats.chunkOutboundOverflowHisto} << std::endl;
+  xo << "  chunkHostedOverflowHisto" << Histo{stats.chunkHostedOverflowHisto}
+     << std::endl;
+  xo << "  keyProbeLengthHisto" << Histo{stats.keyProbeLengthHisto}
+     << std::endl;
+  xo << "  missProbeLengthHisto" << Histo{stats.missProbeLengthHisto}
+     << std::endl;
+  xo << "  totalBytes: " << stats.totalBytes << std::endl;
+  xo << "  valueBytes: " << (stats.size * stats.valueSize) << std::endl;
+  xo << "  overheadBytes: " << stats.overheadBytes << std::endl;
+  if (stats.size > 0) {
+    xo << "  overheadBytesPerKey: "
+       << (static_cast<double>(stats.overheadBytes) /
+           static_cast<double>(stats.size))
+       << std::endl;
+  }
+  xo << "}";
+  return xo;
+}
+
+template <class T>
+class GenericAlloc {
+ public:
+  using value_type = T;
+
+  using pointer = T*;
+  using const_pointer = T const*;
+  using reference = T&;
+  using const_reference = T const&;
+  using size_type = std::size_t;
+
+  using propagate_on_container_swap = std::true_type;
+  using propagate_on_container_copy_assignment = std::true_type;
+  using propagate_on_container_move_assignment = std::true_type;
+
+  using AllocBytesFunc = folly::Function<void*(std::size_t)>;
+  using DeallocBytesFunc = folly::Function<void(void*, std::size_t)>;
+
+  GenericAlloc() = delete;
+
+  template <typename A, typename D>
+  GenericAlloc(A&& alloc, D&& dealloc)
+      : alloc_{std::make_shared<AllocBytesFunc>(std::forward<A>(alloc))},
+        dealloc_{std::make_shared<DeallocBytesFunc>(std::forward<D>(dealloc))} {
+  }
+
+  template <class U>
+  GenericAlloc(GenericAlloc<U> const& other) noexcept
+      : alloc_{other.alloc_}, dealloc_{other.dealloc_} {}
+
+  template <class U>
+  GenericAlloc& operator=(GenericAlloc<U> const& other) noexcept {
+    alloc_ = other.alloc_;
+    dealloc_ = other.dealloc_;
+    return *this;
+  }
+
+  template <class U>
+  GenericAlloc(GenericAlloc<U>&& other) noexcept
+      : alloc_(std::move(other.alloc_)), dealloc_(std::move(other.dealloc_)) {}
+
+  template <class U>
+  GenericAlloc& operator=(GenericAlloc<U>&& other) noexcept {
+    alloc_ = std::move(other.alloc_);
+    dealloc_ = std::move(other.dealloc_);
+    return *this;
+  }
+
+  T* allocate(size_t n) {
+    return static_cast<T*>((*alloc_)(n * sizeof(T)));
+  }
+  void deallocate(T* p, size_t n) {
+    (*dealloc_)(static_cast<void*>(p), n * sizeof(T));
+  }
+
+  template <typename U>
+  bool operator==(GenericAlloc<U> const& rhs) const {
+    return alloc_ == rhs.alloc_;
+  }
+
+  template <typename U>
+  bool operator!=(GenericAlloc<U> const& rhs) const {
+    return !(*this == rhs);
+  }
+
+ private:
+  std::shared_ptr<AllocBytesFunc> alloc_;
+  std::shared_ptr<DeallocBytesFunc> dealloc_;
+
+  template <class U>
+  friend class GenericAlloc;
+};
+
+template <typename T>
+class GenericEqual {
+ public:
+  using EqualFunc = folly::Function<bool(T const&, T const&)>;
+
+  GenericEqual() = delete;
+
+  template <typename E>
+  GenericEqual(E&& equal)
+      : equal_{std::make_shared<EqualFunc>(std::forward<E>(equal))} {}
+
+  bool operator()(T const& lhs, T const& rhs) const {
+    return (*equal_)(lhs, rhs);
+  }
+
+ private:
+  std::shared_ptr<EqualFunc> equal_;
+};
+
+template <typename T>
+class GenericHasher {
+ public:
+  using HasherFunc = folly::Function<std::size_t(T const&)>;
+
+  GenericHasher() = delete;
+
+  template <typename H>
+  GenericHasher(H&& hasher)
+      : hasher_{std::make_shared<HasherFunc>(std::forward<H>(hasher))} {}
+
+  std::size_t operator()(T const& val) const {
+    return (*hasher_)(val);
+  }
+
+ private:
+  std::shared_ptr<HasherFunc> hasher_;
+};
 
 } // namespace f14
 } // namespace folly

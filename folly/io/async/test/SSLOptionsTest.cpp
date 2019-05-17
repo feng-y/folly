@@ -14,8 +14,8 @@
  * limitations under the License.
  */
 
-#include <folly/io/async/SSLContext.h>
 #include <folly/io/async/SSLOptions.h>
+#include <folly/io/async/SSLContext.h>
 #include <folly/portability/GTest.h>
 #include <folly/ssl/OpenSSLPtrTypes.h>
 
@@ -32,7 +32,7 @@ TEST_F(SSLOptionsTest, TestSetCommonCipherList) {
 
   int i = 0;
   ssl::SSLUniquePtr ssl(ctx.createSSL());
-  for (auto& cipher : ssl::SSLCommonOptions::kCipherList) {
+  for (auto& cipher : ssl::SSLCommonOptions::ciphers()) {
     ASSERT_STREQ(cipher, SSL_get_cipher_list(ssl.get(), i++));
   }
   ASSERT_EQ(nullptr, SSL_get_cipher_list(ssl.get(), i));

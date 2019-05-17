@@ -1,6 +1,5 @@
 # Some additional configuration options.
 option(MSVC_ENABLE_ALL_WARNINGS "If enabled, pass /Wall to the compiler." ON)
-option(MSVC_ENABLE_CPP_LATEST "If enabled, pass /std:c++latest to the compiler" ON)
 option(MSVC_ENABLE_DEBUG_INLINING "If enabled, enable inlining in the debug configuration. This allows /Zc:inline to be far more effective." OFF)
 option(MSVC_ENABLE_FAST_LINK "If enabled, pass /DEBUG:FASTLINK to the linker. This makes linking faster, but the gtest integration for Visual Studio can't currently handle the .pdbs generated." OFF)
 option(MSVC_ENABLE_LEAN_AND_MEAN_WINDOWS "If enabled, define WIN32_LEAN_AND_MEAN to include a smaller subset of Windows.h" ON)
@@ -25,6 +24,15 @@ set_property(
 if (NOT MSVC_FAVORED_ARCHITECTURE STREQUAL "blend" AND NOT MSVC_FAVORED_ARCHITECTURE STREQUAL "AMD64" AND NOT MSVC_FAVORED_ARCHITECTURE STREQUAL "INTEL64" AND NOT MSVC_FAVORED_ARCHITECTURE STREQUAL "ATOM")
   message(FATAL_ERROR "MSVC_FAVORED_ARCHITECTURE must be set to one of exactly, 'blend', 'AMD64', 'INTEL64', or 'ATOM'! Got '${MSVC_FAVORED_ARCHITECTURE}' instead!")
 endif()
+
+set(MSVC_LANGUAGE_VERSION "c++latest" CACHE STRING "One of 'c++14', 'c++17', or 'c++latest'. This determines which version of C++ to compile as.")
+set_property(
+  CACHE MSVC_LANGUAGE_VERSION
+  PROPERTY STRINGS
+    "c++14"
+    "c++17"
+    "c++latest"
+)
 
 ############################################################
 # We need to adjust a couple of the default option sets.
@@ -81,10 +89,9 @@ function(apply_folly_compile_options_to_target THETARGET)
       /Zc:threadSafeInit # Enable thread-safe function-local statics initialization.
       /Zc:throwingNew # Assume operator new throws on failure.
 
-      $<$<BOOL:${MSVC_ENABLE_CPP_LATEST}>:/std:c++latest> # Build in C++ Latest mode if requested.
+      /permissive- # Be mean, don't allow bad non-standard stuff (C++/CLI, __declspec, etc. are all left intact).
+      /std:${MSVC_LANGUAGE_VERSION} # Build in the requested version of C++
 
-      # This is only supported by MSVC 2017
-      $<$<BOOL:${MSVC_IS_2017}>:/permissive-> # Be mean, don't allow bad non-standard stuff (C++/CLI, __declspec, etc. are all left intact).
     PRIVATE
       /bigobj # Support objects with > 65k sections. Needed due to templates.
       /favor:${MSVC_FAVORED_ARCHITECTURE} # Architecture to prefer when generating code.
@@ -180,13 +187,6 @@ function(apply_folly_compile_options_to_target THETARGET)
       /wd4701 # Potentially uninitialized local variable used.
       /wd4702 # Unreachable code.
 
-      # MSVC 2015 only:
-      $<$<BOOL:${MSVC_IS_2015}>:
-        /wd4268 # Static/global data initialized with compiler generated default constructor fills the object with zeros.
-        /wd4510 # Default constructor was implicitly defined as deleted.
-        /wd4814 # In C++14 'constexpr' will not imply 'const'.
-      >
-      
       # These warnings are disabled because we've
       # enabled all warnings. If all warnings are
       # not enabled, we still need to disable them
@@ -210,6 +210,7 @@ function(apply_folly_compile_options_to_target THETARGET)
       /wd4623 # Default constructor was implicitly defined as deleted.
       /wd4625 # Copy constructor was implicitly defined as deleted.
       /wd4626 # Assignment operator was implicitly defined as deleted.
+      /wd4643 # Forward declaring standard library types is not permitted.
       /wd4647 # Behavior change in __is_pod.
       /wd4668 # Macro was not defined, replacing with 0.
       /wd4706 # Assignment within conditional expression.
@@ -220,6 +221,7 @@ function(apply_folly_compile_options_to_target THETARGET)
       /wd5026 # Move constructor was implicitly defined as deleted.
       /wd5027 # Move assignment operator was implicitly defined as deleted.
       /wd5031 # #pragma warning(pop): likely mismatch, popping warning state pushed in different file. This is needed because of how boost does things.
+      /wd5045 # Compiler will insert Spectre mitigation for memory load if /Qspectre switch is specified.
 
       # Warnings to treat as errors:
       /we4099 # Mixed use of struct and class on same type names.
@@ -260,7 +262,7 @@ function(apply_folly_compile_options_to_target THETARGET)
       _CRT_NONSTDC_NO_WARNINGS # Don't deprecate posix names of functions.
       _CRT_SECURE_NO_WARNINGS # Don't deprecate the non _s versions of various standard library functions, because safety is for chumps.
       _SCL_SECURE_NO_WARNINGS # Don't deprecate the non _s versions of various standard library functions, because safety is for chumps.
-      
+      _ENABLE_EXTENDED_ALIGNED_STORAGE  #A type with an extended alignment in VS 15.8 or later
       _STL_EXTRA_DISABLED_WARNINGS=4774\ 4987
 
       $<$<BOOL:${MSVC_ENABLE_CPP_LATEST}>:_HAS_AUTO_PTR_ETC=1> # We're building in C++ 17 or greater mode, but certain dependencies (Boost) still have dependencies on unary_function and binary_function, so we have to make sure not to remove them.
@@ -293,8 +295,4 @@ function(apply_folly_compile_options_to_target THETARGET)
   endif()
 endfunction()
 
-target_link_libraries(folly_deps
-  INTERFACE
-    Iphlpapi.lib
-    Ws2_32.lib
-)
+list(APPEND FOLLY_LINK_LIBRARIES Iphlpapi.lib Ws2_32.lib)

@@ -27,48 +27,145 @@
  * @author Xiao Shi       <xshi@fb.com>
  */
 
+#include <tuple>
+
 #include <folly/lang/SafeAssert.h>
 
-#include <folly/container/F14Set-pre.h>
+#include <folly/container/F14Set-fwd.h>
 #include <folly/container/detail/F14Policy.h>
 #include <folly/container/detail/F14Table.h>
 
 #if !FOLLY_F14_VECTOR_INTRINSICS_AVAILABLE
 
+//////// Compatibility for unsupported platforms (not x86_64 and not aarch64)
+
 #include <unordered_set>
 
 namespace folly {
 
+namespace f14 {
+namespace detail {
 template <typename K, typename H, typename E, typename A>
-class F14NodeSet : public std::unordered_set<K, H, E, A> {
+class F14BasicSet : public std::unordered_set<K, H, E, A> {
   using Super = std::unordered_set<K, H, E, A>;
 
  public:
+  using typename Super::pointer;
+  using typename Super::value_type;
+
+  F14BasicSet() = default;
+
   using Super::Super;
-  F14NodeSet() : Super() {}
+
+  //// PUBLIC - F14 Extensions
+
+  // exact for libstdc++, approximate for others
+  std::size_t getAllocatedMemorySize() const {
+    std::size_t rv = 0;
+    visitAllocationClasses(
+        [&](std::size_t bytes, std::size_t n) { rv += bytes * n; });
+    return rv;
+  }
+
+  // exact for libstdc++, approximate for others
+  template <typename V>
+  void visitAllocationClasses(V&& visitor) const {
+    auto bc = this->bucket_count();
+    if (bc > 1) {
+      visitor(bc * sizeof(pointer), 1);
+    }
+    if (this->size() > 0) {
+      visitor(sizeof(StdNodeReplica<K, value_type, H>), this->size());
+    }
+  }
+
+  template <typename V>
+  void visitContiguousRanges(V&& visitor) const {
+    for (value_type const& entry : *this) {
+      value_type const* b = std::addressof(entry);
+      visitor(b, b + 1);
+    }
+  }
+};
+} // namespace detail
+} // namespace f14
+
+template <typename Key, typename Hasher, typename KeyEqual, typename Alloc>
+class F14NodeSet
+    : public f14::detail::F14BasicSet<Key, Hasher, KeyEqual, Alloc> {
+  using Super = f14::detail::F14BasicSet<Key, Hasher, KeyEqual, Alloc>;
+
+ public:
+  using typename Super::value_type;
+
+  F14NodeSet() = default;
+
+  using Super::Super;
+
+  F14NodeSet& operator=(std::initializer_list<value_type> ilist) {
+    Super::operator=(ilist);
+    return *this;
+  }
 };
 
-template <typename K, typename H, typename E, typename A>
-class F14ValueSet : public std::unordered_set<K, H, E, A> {
-  using Super = std::unordered_set<K, H, E, A>;
+template <typename Key, typename Hasher, typename KeyEqual, typename Alloc>
+class F14ValueSet
+    : public f14::detail::F14BasicSet<Key, Hasher, KeyEqual, Alloc> {
+  using Super = f14::detail::F14BasicSet<Key, Hasher, KeyEqual, Alloc>;
 
  public:
-  using Super::Super;
+  using typename Super::value_type;
+
   F14ValueSet() : Super() {}
+
+  using Super::Super;
+
+  F14ValueSet& operator=(std::initializer_list<value_type> ilist) {
+    Super::operator=(ilist);
+    return *this;
+  }
 };
 
-template <typename K, typename H, typename E, typename A>
-class F14VectorSet : public std::unordered_set<K, H, E, A> {
-  using Super = std::unordered_set<K, H, E, A>;
+template <typename Key, typename Hasher, typename KeyEqual, typename Alloc>
+class F14VectorSet
+    : public f14::detail::F14BasicSet<Key, Hasher, KeyEqual, Alloc> {
+  using Super = f14::detail::F14BasicSet<Key, Hasher, KeyEqual, Alloc>;
 
  public:
+  using typename Super::value_type;
+
+  F14VectorSet() = default;
+
   using Super::Super;
-  F14VectorSet() : Super() {}
+
+  F14VectorSet& operator=(std::initializer_list<value_type> ilist) {
+    Super::operator=(ilist);
+    return *this;
+  }
 };
 
+template <typename Key, typename Hasher, typename KeyEqual, typename Alloc>
+class F14FastSet
+    : public f14::detail::F14BasicSet<Key, Hasher, KeyEqual, Alloc> {
+  using Super = f14::detail::F14BasicSet<Key, Hasher, KeyEqual, Alloc>;
+
+ public:
+  using typename Super::value_type;
+
+  F14FastSet() = default;
+
+  using Super::Super;
+
+  F14FastSet& operator=(std::initializer_list<value_type> ilist) {
+    Super::operator=(ilist);
+    return *this;
+  }
+};
 } // namespace folly
 
 #else // FOLLY_F14_VECTOR_INTRINSICS_AVAILABLE
+
+//////// Common case for supported platforms
 
 namespace folly {
 namespace f14 {
@@ -76,12 +173,33 @@ namespace detail {
 
 template <typename Policy>
 class F14BasicSet {
-  template <
-      typename K,
-      typename T,
-      typename H = typename Policy::Hasher,
-      typename E = typename Policy::KeyEqual>
-  using IfIsTransparent = folly::_t<EnableIfIsTransparent<void, H, E, K, T>>;
+  template <typename K, typename T>
+  using EnableHeterogeneousFind = std::enable_if_t<
+      EligibleForHeterogeneousFind<
+          typename Policy::Value,
+          typename Policy::Hasher,
+          typename Policy::KeyEqual,
+          K>::value,
+      T>;
+
+  template <typename K, typename T>
+  using EnableHeterogeneousInsert = std::enable_if_t<
+      EligibleForHeterogeneousInsert<
+          typename Policy::Value,
+          typename Policy::Hasher,
+          typename Policy::KeyEqual,
+          K>::value,
+      T>;
+
+  template <typename K, typename T>
+  using EnableHeterogeneousErase = std::enable_if_t<
+      EligibleForHeterogeneousFind<
+          typename Policy::Value,
+          typename Policy::Hasher,
+          typename Policy::KeyEqual,
+          K>::value &&
+          !std::is_same<typename Policy::Iter, remove_cvref_t<K>>::value,
+      T>;
 
  public:
   //// PUBLIC - Member types
@@ -95,15 +213,18 @@ class F14BasicSet {
   using allocator_type = typename Policy::Alloc;
   using reference = value_type&;
   using const_reference = value_type const&;
-  using pointer = typename std::allocator_traits<allocator_type>::pointer;
-  using const_pointer =
-      typename std::allocator_traits<allocator_type>::const_pointer;
+  using pointer = typename Policy::AllocTraits::pointer;
+  using const_pointer = typename Policy::AllocTraits::const_pointer;
   using iterator = typename Policy::Iter;
   using const_iterator = iterator;
 
+ private:
+  using ItemIter = typename Policy::ItemIter;
+
+ public:
   //// PUBLIC - Member functions
 
-  F14BasicSet() noexcept(F14Table<Policy>::kDefaultConstructIsNoexcept)
+  F14BasicSet() noexcept(Policy::kDefaultConstructIsNoexcept)
       : F14BasicSet(0) {}
 
   explicit F14BasicSet(
@@ -122,7 +243,8 @@ class F14BasicSet {
       allocator_type const& alloc)
       : F14BasicSet(initialCapacity, hash, key_equal{}, alloc) {}
 
-  explicit F14BasicSet(allocator_type const& alloc) : F14BasicSet(0, alloc) {}
+  explicit F14BasicSet(allocator_type const& alloc)
+      : F14BasicSet(0, hasher{}, key_equal{}, alloc) {}
 
   template <typename InputIt>
   F14BasicSet(
@@ -165,7 +287,7 @@ class F14BasicSet {
   F14BasicSet(F14BasicSet&& rhs) = default;
 
   F14BasicSet(F14BasicSet&& rhs, allocator_type const& alloc) noexcept(
-      F14Table<Policy>::kAllocIsAlwaysEqual)
+      Policy::kAllocIsAlwaysEqual)
       : table_{std::move(rhs.table_), alloc} {}
 
   F14BasicSet(
@@ -198,6 +320,12 @@ class F14BasicSet {
   F14BasicSet& operator=(F14BasicSet const&) = default;
 
   F14BasicSet& operator=(F14BasicSet&&) = default;
+
+  F14BasicSet& operator=(std::initializer_list<value_type> ilist) {
+    clear();
+    bulkInsert(ilist.begin(), ilist.end(), false);
+    return *this;
+  }
 
   allocator_type get_allocator() const noexcept {
     return table_.alloc();
@@ -239,10 +367,6 @@ class F14BasicSet {
     return table_.max_size();
   }
 
-  F14TableStats computeStats() const {
-    return table_.computeStats();
-  }
-
   //// PUBLIC - Modifiers
 
   void clear() noexcept {
@@ -250,16 +374,11 @@ class F14BasicSet {
   }
 
   std::pair<iterator, bool> insert(value_type const& value) {
-    auto rv = table_.tryEmplaceValue(value, value);
-    return std::make_pair(table_.makeIter(rv.first), rv.second);
+    return emplace(value);
   }
 
   std::pair<iterator, bool> insert(value_type&& value) {
-    // tryEmplaceValue guarantees not to touch the first arg after touching
-    // any others, so although this looks fishy it is okay
-    value_type const& searchKey = value;
-    auto rv = table_.tryEmplaceValue(searchKey, std::move(value));
-    return std::make_pair(table_.makeIter(rv.first), rv.second);
+    return emplace(std::move(value));
   }
 
   // std::unordered_set's hinted insertion API is misleading.  No
@@ -275,12 +394,21 @@ class F14BasicSet {
     return insert(std::move(value)).first;
   }
 
+  template <typename K>
+  EnableHeterogeneousInsert<K, std::pair<iterator, bool>> insert(K&& value) {
+    return emplace(std::forward<K>(value));
+  }
+
  private:
   template <class InputIt>
   FOLLY_ALWAYS_INLINE void
   bulkInsert(InputIt first, InputIt last, bool autoReserve) {
     if (autoReserve) {
-      table_.reserveForInsert(std::distance(first, last));
+      auto n = std::distance(first, last);
+      if (n == 0) {
+        return;
+      }
+      table_.reserveForInsert(n);
     }
     while (first != last) {
       insert(*first);
@@ -323,15 +451,19 @@ class F14BasicSet {
     insert(ilist.begin(), ilist.end());
   }
 
-  // node API doesn't make sense for value set, which stores values inline
-
-  // emplace won't actually be more efficient than insert until we
-  // add heterogeneous lookup, but it is still useful now from a code
-  // compactness standpoint.
   template <class... Args>
   std::pair<iterator, bool> emplace(Args&&... args) {
-    key_type key(std::forward<Args>(args)...);
-    return insert(std::move(key));
+    using K = KeyTypeForEmplace<key_type, hasher, key_equal, Args...>;
+
+    // If args is a single arg that can be emplaced directly (either
+    // key_type or a heterogeneous find + conversion to key_type) key will
+    // just be a reference to that arg, otherwise this will construct an
+    // intermediate key.
+    K key(std::forward<Args>(args)...);
+
+    auto rv = table_.tryEmplaceValue(key, std::forward<K>(key));
+
+    return std::make_pair(table_.makeIter(rv.first), rv.second);
   }
 
   template <class... Args>
@@ -340,35 +472,43 @@ class F14BasicSet {
   }
 
   FOLLY_ALWAYS_INLINE iterator erase(const_iterator pos) {
-    return eraseInto(pos, [](value_type&) {});
+    return eraseInto(pos, [](value_type&&) {});
   }
 
   iterator erase(const_iterator first, const_iterator last) {
-    return eraseInto(first, last, [](value_type&) {});
+    return eraseInto(first, last, [](value_type&&) {});
   }
 
   size_type erase(key_type const& key) {
-    return eraseInto(key, [](value_type&) {});
+    return eraseInto(key, [](value_type&&) {});
+  }
+
+  template <typename K>
+  EnableHeterogeneousErase<K, size_type> erase(K const& key) {
+    return eraseInto(key, [](value_type&&) {});
   }
 
   // eraseInto contains the same overloads as erase but provides
-  // an additional callback argument which is called with a non-const lvalue
+  // an additional callback argument which is called with an rvalue
   // reference to the item directly before it is destroyed. This can be
   // used to extract an item out of a F14Set while avoiding a copy.
   template <typename BeforeDestroy>
   FOLLY_ALWAYS_INLINE iterator
-  eraseInto(const_iterator pos, BeforeDestroy const& beforeDestroy) {
+  eraseInto(const_iterator pos, BeforeDestroy&& beforeDestroy) {
+    auto itemPos = table_.unwrapIter(pos);
+    table_.eraseIterInto(itemPos, beforeDestroy);
+
     // If we are inlined then gcc and clang can optimize away all of the
     // work of ++pos if the caller discards it.
-    table_.eraseInto(table_.unwrapIter(pos), beforeDestroy);
-    return ++pos;
+    itemPos.advanceLikelyDead();
+    return table_.makeIter(itemPos);
   }
 
   template <typename BeforeDestroy>
   iterator eraseInto(
       const_iterator first,
       const_iterator last,
-      BeforeDestroy const& beforeDestroy) {
+      BeforeDestroy&& beforeDestroy) {
     while (first != last) {
       first = eraseInto(first, beforeDestroy);
     }
@@ -376,19 +516,27 @@ class F14BasicSet {
   }
 
   template <typename BeforeDestroy>
-  size_type eraseInto(key_type const& key, BeforeDestroy const& beforeDestroy) {
-    return table_.eraseInto(key, beforeDestroy);
+  size_type eraseInto(key_type const& key, BeforeDestroy&& beforeDestroy) {
+    return table_.eraseKeyInto(key, beforeDestroy);
+  }
+
+  template <typename K, typename BeforeDestroy>
+  EnableHeterogeneousErase<K, size_type> eraseInto(
+      K const& key,
+      BeforeDestroy&& beforeDestroy) {
+    return table_.eraseKeyInto(key, beforeDestroy);
   }
 
   //// PUBLIC - Lookup
 
-  FOLLY_ALWAYS_INLINE std::size_t count(key_type const& key) const {
-    return table_.find(key).atEnd() ? 0 : 1;
+  FOLLY_ALWAYS_INLINE size_type count(key_type const& key) const {
+    return contains(key) ? 1 : 0;
   }
 
   template <typename K>
-  FOLLY_ALWAYS_INLINE IfIsTransparent<K, size_type> count(K const& key) const {
-    return table_.find(key).atEnd() ? 0 : 1;
+  FOLLY_ALWAYS_INLINE EnableHeterogeneousFind<K, size_type> count(
+      K const& key) const {
+    return contains(key) ? 1 : 0;
   }
 
   // prehash(key) does the work of evaluating hash_function()(key)
@@ -410,7 +558,7 @@ class F14BasicSet {
   }
 
   template <typename K>
-  IfIsTransparent<K, F14HashToken> prehash(K const& key) const {
+  EnableHeterogeneousFind<K, F14HashToken> prehash(K const& key) const {
     return table_.prehash(key);
   }
 
@@ -433,28 +581,51 @@ class F14BasicSet {
   }
 
   template <typename K>
-  FOLLY_ALWAYS_INLINE IfIsTransparent<K, iterator> find(K const& key) {
+  FOLLY_ALWAYS_INLINE EnableHeterogeneousFind<K, iterator> find(K const& key) {
     return const_cast<F14BasicSet const*>(this)->find(key);
   }
 
   template <typename K>
-  FOLLY_ALWAYS_INLINE IfIsTransparent<K, const_iterator> find(
+  FOLLY_ALWAYS_INLINE EnableHeterogeneousFind<K, const_iterator> find(
       K const& key) const {
     return table_.makeIter(table_.find(key));
   }
 
   template <typename K>
-  FOLLY_ALWAYS_INLINE IfIsTransparent<K, iterator> find(
+  FOLLY_ALWAYS_INLINE EnableHeterogeneousFind<K, iterator> find(
       F14HashToken const& token,
       K const& key) {
     return const_cast<F14BasicSet const*>(this)->find(token, key);
   }
 
   template <typename K>
-  FOLLY_ALWAYS_INLINE IfIsTransparent<K, const_iterator> find(
+  FOLLY_ALWAYS_INLINE EnableHeterogeneousFind<K, const_iterator> find(
       F14HashToken const& token,
       K const& key) const {
     return table_.makeIter(table_.find(token, key));
+  }
+
+  FOLLY_ALWAYS_INLINE bool contains(key_type const& key) const {
+    return !table_.find(key).atEnd();
+  }
+
+  template <typename K>
+  FOLLY_ALWAYS_INLINE EnableHeterogeneousFind<K, bool> contains(
+      K const& key) const {
+    return !table_.find(key).atEnd();
+  }
+
+  FOLLY_ALWAYS_INLINE bool contains(
+      F14HashToken const& token,
+      key_type const& key) const {
+    return !table_.find(token, key).atEnd();
+  }
+
+  template <typename K>
+  FOLLY_ALWAYS_INLINE EnableHeterogeneousFind<K, bool> contains(
+      F14HashToken const& token,
+      K const& key) const {
+    return !table_.find(token, key).atEnd();
   }
 
   std::pair<iterator, iterator> equal_range(key_type const& key) {
@@ -467,13 +638,14 @@ class F14BasicSet {
   }
 
   template <typename K>
-  IfIsTransparent<K, std::pair<iterator, iterator>> equal_range(K const& key) {
+  EnableHeterogeneousFind<K, std::pair<iterator, iterator>> equal_range(
+      K const& key) {
     return equal_range(*this, key);
   }
 
   template <typename K>
-  IfIsTransparent<K, std::pair<const_iterator, const_iterator>> equal_range(
-      K const& key) const {
+  EnableHeterogeneousFind<K, std::pair<const_iterator, const_iterator>>
+  equal_range(K const& key) const {
     return equal_range(*this, key);
   }
 
@@ -520,6 +692,38 @@ class F14BasicSet {
 
   key_equal key_eq() const {
     return table_.keyEqual();
+  }
+
+  //// PUBLIC - F14 Extensions
+
+  // Get memory footprint, not including sizeof(*this).
+  std::size_t getAllocatedMemorySize() const {
+    return table_.getAllocatedMemorySize();
+  }
+
+  // Enumerates classes of allocated memory blocks currently owned
+  // by this table, calling visitor(allocationSize, allocationCount).
+  // This can be used to get a more accurate indication of memory footprint
+  // than getAllocatedMemorySize() if you have some way of computing the
+  // internal fragmentation of the allocator, such as JEMalloc's nallocx.
+  // The visitor might be called twice with the same allocationSize. The
+  // visitor's computation should produce the same result for visitor(8,
+  // 2) as for two calls to visitor(8, 1), for example.  The visitor may
+  // be called with a zero allocationCount.
+  template <typename V>
+  void visitAllocationClasses(V&& visitor) const {
+    return table_.visitAllocationClasses(visitor);
+  }
+
+  // Calls visitor with two value_type const*, b and e, such that every
+  // entry in the table is included in exactly one of the ranges [b,e).
+  // This can be used to efficiently iterate elements in bulk when crossing
+  // an API boundary that supports contiguous blocks of items.
+  template <typename V>
+  void visitContiguousRanges(V&& visitor) const;
+
+  F14TableStats computeStats() const noexcept {
+    return table_.computeStats();
   }
 
  private:
@@ -569,24 +773,36 @@ class F14ValueSet
           Hasher,
           KeyEqual,
           Alloc>> {
+ protected:
   using Policy = f14::detail::SetPolicyWithDefaults<
       f14::detail::ValueContainerPolicy,
       Key,
       Hasher,
       KeyEqual,
       Alloc>;
+
+ private:
   using Super = f14::detail::F14BasicSet<Policy>;
 
  public:
-  F14ValueSet() noexcept(
-      f14::detail::F14Table<Policy>::kDefaultConstructIsNoexcept)
-      : Super{} {}
+  using typename Super::value_type;
+
+  F14ValueSet() = default;
 
   using Super::Super;
 
-  void swap(F14ValueSet& rhs) noexcept(
-      f14::detail::F14Table<Policy>::kSwapIsNoexcept) {
+  F14ValueSet& operator=(std::initializer_list<value_type> ilist) {
+    Super::operator=(ilist);
+    return *this;
+  }
+
+  void swap(F14ValueSet& rhs) noexcept(Policy::kSwapIsNoexcept) {
     this->table_.swap(rhs.table_);
+  }
+
+  template <typename V>
+  void visitContiguousRanges(V&& visitor) const {
+    this->table_.visitContiguousItemRanges(std::forward<V>(visitor));
   }
 };
 
@@ -612,24 +828,39 @@ class F14NodeSet
           Hasher,
           KeyEqual,
           Alloc>> {
+ protected:
   using Policy = f14::detail::SetPolicyWithDefaults<
       f14::detail::NodeContainerPolicy,
       Key,
       Hasher,
       KeyEqual,
       Alloc>;
+
+ private:
   using Super = f14::detail::F14BasicSet<Policy>;
 
  public:
-  F14NodeSet() noexcept(
-      f14::detail::F14Table<Policy>::kDefaultConstructIsNoexcept)
-      : Super{} {}
+  using typename Super::value_type;
+
+  F14NodeSet() = default;
 
   using Super::Super;
 
-  void swap(F14NodeSet& rhs) noexcept(
-      f14::detail::F14Table<Policy>::kSwapIsNoexcept) {
+  F14NodeSet& operator=(std::initializer_list<value_type> ilist) {
+    Super::operator=(ilist);
+    return *this;
+  }
+
+  void swap(F14NodeSet& rhs) noexcept(Policy::kSwapIsNoexcept) {
     this->table_.swap(rhs.table_);
+  }
+
+  template <typename V>
+  void visitContiguousRanges(V&& visitor) const {
+    this->table_.visitItems([&](typename Policy::Item ptr) {
+      value_type const* b = std::addressof(*ptr);
+      visitor(b, b + 1);
+    });
   }
 };
 
@@ -647,39 +878,201 @@ bool operator!=(
   return !(lhs == rhs);
 }
 
-template <typename Key, typename Hasher, typename KeyEqual, typename Alloc>
-class F14VectorSet
-    : public f14::detail::F14BasicSet<f14::detail::SetPolicyWithDefaults<
-          f14::detail::VectorContainerPolicy,
-          Key,
-          Hasher,
-          KeyEqual,
-          Alloc>> {
-  using Policy = f14::detail::SetPolicyWithDefaults<
-      f14::detail::VectorContainerPolicy,
+namespace f14 {
+namespace detail {
+template <
+    typename Key,
+    typename Hasher,
+    typename KeyEqual,
+    typename Alloc,
+    typename EligibleForPerturbedInsertionOrder>
+class F14VectorSetImpl : public F14BasicSet<SetPolicyWithDefaults<
+                             VectorContainerPolicy,
+                             Key,
+                             Hasher,
+                             KeyEqual,
+                             Alloc,
+                             EligibleForPerturbedInsertionOrder>> {
+ protected:
+  using Policy = SetPolicyWithDefaults<
+      VectorContainerPolicy,
       Key,
       Hasher,
       KeyEqual,
-      Alloc>;
-  using Super = f14::detail::F14BasicSet<Policy>;
+      Alloc,
+      EligibleForPerturbedInsertionOrder>;
+
+ private:
+  using Super = F14BasicSet<Policy>;
+
+  template <typename K, typename T>
+  using EnableHeterogeneousVectorErase = std::enable_if_t<
+      EligibleForHeterogeneousFind<
+          typename Policy::Value,
+          typename Policy::Hasher,
+          typename Policy::KeyEqual,
+          K>::value &&
+          !std::is_same<typename Policy::Iter, remove_cvref_t<K>>::value &&
+          !std::is_same<typename Policy::ReverseIter, remove_cvref_t<K>>::value,
+      T>;
 
  public:
   using typename Super::const_iterator;
   using typename Super::iterator;
   using typename Super::key_type;
   using typename Super::value_type;
-  using reverse_iterator = typename Policy::ReverseIter;
-  using const_reverse_iterator = typename Policy::ConstReverseIter;
 
-  F14VectorSet() noexcept(
-      f14::detail::F14Table<Policy>::kDefaultConstructIsNoexcept)
-      : Super{} {}
+  F14VectorSetImpl() = default;
 
-  // inherit constructors
   using Super::Super;
 
-  void swap(F14VectorSet& rhs) noexcept(
-      f14::detail::F14Table<Policy>::kSwapIsNoexcept) {
+  F14VectorSetImpl& operator=(std::initializer_list<value_type> ilist) {
+    Super::operator=(ilist);
+    return *this;
+  }
+
+  iterator begin() {
+    return cbegin();
+  }
+  const_iterator begin() const {
+    return cbegin();
+  }
+  const_iterator cbegin() const {
+    return this->table_.linearBegin(this->size());
+  }
+
+  iterator end() {
+    return cend();
+  }
+  const_iterator end() const {
+    return cend();
+  }
+  const_iterator cend() const {
+    return this->table_.linearEnd();
+  }
+
+ private:
+  template <typename BeforeDestroy>
+  void eraseUnderlying(
+      typename Policy::ItemIter underlying,
+      BeforeDestroy&& beforeDestroy) {
+    Alloc& a = this->table_.alloc();
+    auto values = this->table_.values_;
+
+    // destroy the value and remove the ptr from the base table
+    auto index = underlying.item();
+    this->table_.eraseIterInto(underlying, beforeDestroy);
+    Policy::AllocTraits::destroy(a, std::addressof(values[index]));
+
+    // move the last element in values_ down and fix up the inbound index
+    auto tailIndex = this->size();
+    if (tailIndex != index) {
+      auto tail = this->table_.find(
+          VectorContainerIndexSearch{static_cast<uint32_t>(tailIndex)});
+      tail.item() = index;
+      auto p = std::addressof(values[index]);
+      assume(p != nullptr);
+      this->table_.transfer(a, std::addressof(values[tailIndex]), p, 1);
+    }
+  }
+
+  template <typename K, typename BeforeDestroy>
+  std::size_t eraseUnderlyingKey(K const& key, BeforeDestroy&& beforeDestroy) {
+    auto underlying = this->table_.find(key);
+    if (underlying.atEnd()) {
+      return 0;
+    } else {
+      eraseUnderlying(underlying, beforeDestroy);
+      return 1;
+    }
+  }
+
+ public:
+  FOLLY_ALWAYS_INLINE iterator erase(const_iterator pos) {
+    return eraseInto(pos, [](value_type&&) {});
+  }
+
+  iterator erase(const_iterator first, const_iterator last) {
+    return eraseInto(first, last, [](value_type&&) {});
+  }
+
+  std::size_t erase(key_type const& key) {
+    return eraseInto(key, [](value_type&&) {});
+  }
+
+  template <typename K>
+  EnableHeterogeneousVectorErase<K, std::size_t> erase(K const& key) {
+    return eraseInto(key, [](value_type&&) {});
+  }
+
+  template <typename BeforeDestroy>
+  FOLLY_ALWAYS_INLINE iterator
+  eraseInto(const_iterator pos, BeforeDestroy&& beforeDestroy) {
+    auto underlying = this->table_.find(
+        VectorContainerIndexSearch{this->table_.iterToIndex(pos)});
+    eraseUnderlying(underlying, beforeDestroy);
+    return ++pos;
+  }
+
+  template <typename BeforeDestroy>
+  iterator eraseInto(
+      const_iterator first,
+      const_iterator last,
+      BeforeDestroy&& beforeDestroy) {
+    while (first != last) {
+      first = eraseInto(first, beforeDestroy);
+    }
+    return first;
+  }
+
+  template <typename BeforeDestroy>
+  std::size_t eraseInto(key_type const& key, BeforeDestroy&& beforeDestroy) {
+    return eraseUnderlyingKey(key, beforeDestroy);
+  }
+
+  template <typename K, typename BeforeDestroy>
+  EnableHeterogeneousVectorErase<K, std::size_t> eraseInto(
+      K const& key,
+      BeforeDestroy&& beforeDestroy) {
+    return eraseUnderlyingKey(key, beforeDestroy);
+  }
+
+  template <typename V>
+  void visitContiguousRanges(V&& visitor) const {
+    auto n = this->table_.size();
+    if (n > 0) {
+      value_type const* b = std::addressof(this->table_.values_[0]);
+      visitor(b, b + n);
+    }
+  }
+};
+} // namespace detail
+} // namespace f14
+
+template <typename Key, typename Hasher, typename KeyEqual, typename Alloc>
+class F14VectorSet
+    : public f14::detail::
+          F14VectorSetImpl<Key, Hasher, KeyEqual, Alloc, std::false_type> {
+  using Super = f14::detail::
+      F14VectorSetImpl<Key, Hasher, KeyEqual, Alloc, std::false_type>;
+
+ public:
+  using typename Super::const_iterator;
+  using typename Super::iterator;
+  using typename Super::value_type;
+  using reverse_iterator = typename Super::Policy::ReverseIter;
+  using const_reverse_iterator = reverse_iterator;
+
+  F14VectorSet() = default;
+
+  using Super::Super;
+
+  F14VectorSet& operator=(std::initializer_list<value_type> ilist) {
+    Super::operator=(ilist);
+    return *this;
+  }
+
+  void swap(F14VectorSet& rhs) noexcept(Super::Policy::kSwapIsNoexcept) {
     this->table_.swap(rhs.table_);
   }
 
@@ -703,26 +1096,11 @@ class F14VectorSet
   // by std::set and std::unordered_set.  erase(iter) invalidates iter
   // and all iterators before iter in the non-reverse iteration order.
   // Every successful erase invalidates all reverse iterators.
-
-  iterator begin() {
-    return cbegin();
-  }
-  const_iterator begin() const {
-    return cbegin();
-  }
-  const_iterator cbegin() const {
-    return this->table_.linearBegin(this->size());
-  }
-
-  iterator end() {
-    return cend();
-  }
-  const_iterator end() const {
-    return cend();
-  }
-  const_iterator cend() const {
-    return this->table_.linearEnd();
-  }
+  //
+  // No erase is provided for reverse_iterator (AKA const_reverse_iterator)
+  // to make it harder to shoot yourself in the foot by erasing while
+  // reverse-iterating.  You can write that as set.erase(set.iter(riter))
+  // if you need it.
 
   reverse_iterator rbegin() {
     return this->table_.values_;
@@ -758,77 +1136,6 @@ class F14VectorSet
   const_reverse_iterator riter(const_iterator it) const {
     return this->table_.riter(it);
   }
-
- private:
-  template <typename BeforeDestroy>
-  void eraseUnderlying(
-      typename Policy::ItemIter underlying,
-      BeforeDestroy const& beforeDestroy) {
-    Alloc& a = this->table_.alloc();
-    auto values = this->table_.values_;
-
-    // destroy the value and remove the ptr from the base table
-    auto index = underlying.item();
-    this->table_.eraseInto(underlying, beforeDestroy);
-    std::allocator_traits<Alloc>::destroy(a, std::addressof(values[index]));
-
-    // move the last element in values_ down and fix up the inbound index
-    auto tailIndex = this->size();
-    if (tailIndex != index) {
-      auto tail = this->table_.find(f14::detail::VectorContainerIndexSearch{
-          static_cast<uint32_t>(tailIndex)});
-      tail.item() = index;
-      auto p = std::addressof(values[index]);
-      folly::assume(p != nullptr);
-      this->table_.transfer(a, std::addressof(values[tailIndex]), p, 1);
-    }
-  }
-
- public:
-  FOLLY_ALWAYS_INLINE iterator erase(const_iterator pos) {
-    return eraseInto(pos, [](value_type&) {});
-  }
-
-  iterator erase(const_iterator first, const_iterator last) {
-    return eraseInto(first, last, [](value_type&) {});
-  }
-
-  std::size_t erase(key_type const& key) {
-    return eraseInto(key, [](value_type&) {});
-  }
-
-  template <typename BeforeDestroy>
-  FOLLY_ALWAYS_INLINE iterator
-  eraseInto(const_iterator pos, BeforeDestroy const& beforeDestroy) {
-    auto underlying = this->table_.find(
-        f14::detail::VectorContainerIndexSearch{this->table_.iterToIndex(pos)});
-    eraseUnderlying(underlying, beforeDestroy);
-    return ++pos;
-  }
-
-  template <typename BeforeDestroy>
-  iterator eraseInto(
-      const_iterator first,
-      const_iterator last,
-      BeforeDestroy const& beforeDestroy) {
-    while (first != last) {
-      first = eraseInto(first, beforeDestroy);
-    }
-    return first;
-  }
-
-  template <typename BeforeDestroy>
-  std::size_t eraseInto(
-      key_type const& key,
-      BeforeDestroy const& beforeDestroy) {
-    auto underlying = this->table_.find(key);
-    if (underlying.atEnd()) {
-      return 0;
-    } else {
-      eraseUnderlying(underlying, beforeDestroy);
-      return 1;
-    }
-  }
 };
 
 template <typename K, typename H, typename E, typename A>
@@ -844,25 +1151,55 @@ bool operator!=(
     F14VectorSet<K, H, E, A> const& rhs) {
   return !(lhs == rhs);
 }
+
+template <typename Key, typename Hasher, typename KeyEqual, typename Alloc>
+class F14FastSet
+    : public std::conditional_t<
+          sizeof(Key) < 24,
+          F14ValueSet<Key, Hasher, KeyEqual, Alloc>,
+          f14::detail::
+              F14VectorSetImpl<Key, Hasher, KeyEqual, Alloc, std::true_type>> {
+  using Super = std::conditional_t<
+      sizeof(Key) < 24,
+      F14ValueSet<Key, Hasher, KeyEqual, Alloc>,
+      f14::detail::
+          F14VectorSetImpl<Key, Hasher, KeyEqual, Alloc, std::true_type>>;
+
+ public:
+  using typename Super::value_type;
+
+  F14FastSet() = default;
+
+  using Super::Super;
+
+  F14FastSet& operator=(std::initializer_list<value_type> ilist) {
+    Super::operator=(ilist);
+    return *this;
+  }
+
+  void swap(F14FastSet& rhs) noexcept(Super::Policy::kSwapIsNoexcept) {
+    this->table_.swap(rhs.table_);
+  }
+};
+
+template <typename K, typename H, typename E, typename A>
+bool operator==(
+    F14FastSet<K, H, E, A> const& lhs,
+    F14FastSet<K, H, E, A> const& rhs) {
+  return setsEqual(lhs, rhs);
+}
+
+template <typename K, typename H, typename E, typename A>
+bool operator!=(
+    F14FastSet<K, H, E, A> const& lhs,
+    F14FastSet<K, H, E, A> const& rhs) {
+  return !(lhs == rhs);
+}
 } // namespace folly
 
 #endif // FOLLY_F14_VECTOR_INTRINSICS_AVAILABLE
 
 namespace folly {
-template <typename Key, typename Hasher, typename KeyEqual, typename Alloc>
-class F14FastSet : public std::conditional_t<
-                       sizeof(Key) < 24,
-                       F14ValueSet<Key, Hasher, KeyEqual, Alloc>,
-                       F14VectorSet<Key, Hasher, KeyEqual, Alloc>> {
-  using Super = std::conditional_t<
-      sizeof(Key) < 24,
-      F14ValueSet<Key, Hasher, KeyEqual, Alloc>,
-      F14VectorSet<Key, Hasher, KeyEqual, Alloc>>;
-
- public:
-  using Super::Super;
-  F14FastSet() : Super() {}
-};
 
 template <typename K, typename H, typename E, typename A>
 void swap(F14ValueSet<K, H, E, A>& lhs, F14ValueSet<K, H, E, A>& rhs) noexcept(
@@ -889,4 +1226,23 @@ void swap(F14FastSet<K, H, E, A>& lhs, F14FastSet<K, H, E, A>& rhs) noexcept(
   lhs.swap(rhs);
 }
 
+template <typename K, typename H, typename E, typename A, typename Pred>
+void erase_if(F14ValueSet<K, H, E, A>& c, Pred pred) {
+  f14::detail::erase_if_impl(c, pred);
+}
+
+template <typename K, typename H, typename E, typename A, typename Pred>
+void erase_if(F14NodeSet<K, H, E, A>& c, Pred pred) {
+  f14::detail::erase_if_impl(c, pred);
+}
+
+template <typename K, typename H, typename E, typename A, typename Pred>
+void erase_if(F14VectorSet<K, H, E, A>& c, Pred pred) {
+  f14::detail::erase_if_impl(c, pred);
+}
+
+template <typename K, typename H, typename E, typename A, typename Pred>
+void erase_if(F14FastSet<K, H, E, A>& c, Pred pred) {
+  f14::detail::erase_if_impl(c, pred);
+}
 } // namespace folly

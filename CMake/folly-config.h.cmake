@@ -35,13 +35,10 @@
 
 #cmakedefine FOLLY_HAVE_LIBGLOG 1
 
-#cmakedefine FOLLY_HAVE_MALLOC_H 1
-#cmakedefine FOLLY_HAVE_BITS_CXXCONFIG_H 1
-#cmakedefine FOLLY_HAVE_FEATURES_H 1
-#cmakedefine FOLLY_HAVE_LINUX_MEMBARRIER_H 1
 #cmakedefine FOLLY_USE_JEMALLOC 1
+#cmakedefine FOLLY_USE_LIBSTDCPP 1
 
-#if FOLLY_HAVE_FEATURES_H
+#if __has_include(<features.h>)
 #include <features.h>
 #endif
 
@@ -49,7 +46,7 @@
 #cmakedefine FOLLY_HAVE_PREADV 1
 #cmakedefine FOLLY_HAVE_PWRITEV 1
 #cmakedefine FOLLY_HAVE_CLOCK_GETTIME 1
-#cmakedefine FOLLY_HAVE_CPLUS_DEMANGLE_V3_CALLBACK 1
+#cmakedefine FOLLY_HAVE_PIPE2 1
 #cmakedefine FOLLY_HAVE_OPENSSL_ASN1_TIME_DIFF 1
 
 #cmakedefine FOLLY_HAVE_IFUNC 1
@@ -67,7 +64,6 @@
 #cmakedefine FOLLY_HAVE_XSI_STRERROR_R 1
 #cmakedefine HAVE_VSNPRINTF_ERRORS 1
 
-#cmakedefine FOLLY_HAVE_LIBDWARF_DWARF_H 1
 #cmakedefine FOLLY_USE_SYMBOLIZER 1
 #define FOLLY_DEMANGLE_MAX_SYMBOL_SIZE 1024
 
@@ -80,4 +76,8 @@
 #cmakedefine FOLLY_HAVE_LIBZSTD 1
 #cmakedefine FOLLY_HAVE_LIBBZ2 1
 
+#cmakedefine FOLLY_ASAN_ENABLED 1
+
 #cmakedefine FOLLY_SUPPORT_SHARED_LIBRARY 1
+#cmakedefine FOLLY_HAVE_SENDMMSG 1
+#cmakedefine FOLLY_HAVE_RECVMMSG 1

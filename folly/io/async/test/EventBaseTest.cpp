@@ -27,22 +27,23 @@
 #include <folly/futures/Promise.h>
 
 #include <atomic>
+#include <future>
 #include <iostream>
 #include <memory>
 #include <thread>
 
 using std::atomic;
-using std::deque;
-using std::pair;
-using std::vector;
-using std::unique_ptr;
-using std::thread;
-using std::make_pair;
 using std::cerr;
+using std::deque;
 using std::endl;
-using std::chrono::milliseconds;
-using std::chrono::microseconds;
+using std::make_pair;
+using std::pair;
+using std::thread;
+using std::unique_ptr;
+using std::vector;
 using std::chrono::duration_cast;
+using std::chrono::microseconds;
+using std::chrono::milliseconds;
 
 using namespace std::chrono_literals;
 
@@ -135,15 +136,15 @@ struct ScheduledEvent {
 
 void scheduleEvents(EventBase* eventBase, int fd, ScheduledEvent* events) {
   for (ScheduledEvent* ev = events; ev->milliseconds > 0; ++ev) {
-    eventBase->tryRunAfterDelay(std::bind(&ScheduledEvent::perform, ev, fd),
-                             ev->milliseconds);
+    eventBase->tryRunAfterDelay(
+        std::bind(&ScheduledEvent::perform, ev, fd), ev->milliseconds);
   }
 }
 
 class TestHandler : public EventHandler {
  public:
   TestHandler(EventBase* eventBase, int fd)
-    : EventHandler(eventBase, fd), fd_(fd) {}
+      : EventHandler(eventBase, NetworkSocket::fromFd(fd)), fd_(fd) {}
 
   void handlerReady(uint16_t events) noexcept override {
     ssize_t bytesRead = 0;
@@ -164,10 +165,10 @@ class TestHandler : public EventHandler {
 
   struct EventRecord {
     EventRecord(uint16_t events_, size_t bytesRead_, size_t bytesWritten_)
-      : events(events_)
-      , timestamp()
-      , bytesRead(bytesRead_)
-      , bytesWritten(bytesWritten_) {}
+        : events(events_),
+          timestamp(),
+          bytesRead(bytesRead_),
+          bytesWritten(bytesWritten_) {}
 
     uint16_t events;
     TimePoint timestamp;
@@ -194,9 +195,9 @@ TEST(EventBaseTest, ReadEvent) {
 
   // Register timeouts to perform two write events
   ScheduledEvent events[] = {
-    { 10, EventHandler::WRITE, 2345, 0 },
-    { 160, EventHandler::WRITE, 99, 0 },
-    { 0, 0, 0, 0 },
+      {10, EventHandler::WRITE, 2345, 0},
+      {160, EventHandler::WRITE, 99, 0},
+      {0, 0, 0, 0},
   };
   scheduleEvents(&eb, sp[1], events);
 
@@ -210,12 +211,15 @@ TEST(EventBaseTest, ReadEvent) {
   // the first chunk of data was received.
   ASSERT_EQ(handler.log.size(), 1);
   ASSERT_EQ(handler.log[0].events, EventHandler::READ);
-  T_CHECK_TIMEOUT(start, handler.log[0].timestamp,
-                  milliseconds(events[0].milliseconds), milliseconds(90));
+  T_CHECK_TIMEOUT(
+      start,
+      handler.log[0].timestamp,
+      milliseconds(events[0].milliseconds),
+      milliseconds(90));
   ASSERT_EQ(handler.log[0].bytesRead, events[0].length);
   ASSERT_EQ(handler.log[0].bytesWritten, 0);
-  T_CHECK_TIMEOUT(start, end,
-                  milliseconds(events[1].milliseconds), milliseconds(30));
+  T_CHECK_TIMEOUT(
+      start, end, milliseconds(events[1].milliseconds), milliseconds(30));
 
   // Make sure the second chunk of data is still waiting to be read.
   size_t bytesRemaining = readUntilEmpty(sp[0]);
@@ -235,11 +239,11 @@ TEST(EventBaseTest, ReadPersist) {
 
   // Register several timeouts to perform writes
   ScheduledEvent events[] = {
-    { 10,  EventHandler::WRITE, 1024, 0 },
-    { 20,  EventHandler::WRITE, 2211, 0 },
-    { 30,  EventHandler::WRITE, 4096, 0 },
-    { 100, EventHandler::WRITE, 100,  0 },
-    { 0, 0, 0, 0 },
+      {10, EventHandler::WRITE, 1024, 0},
+      {20, EventHandler::WRITE, 2211, 0},
+      {30, EventHandler::WRITE, 4096, 0},
+      {100, EventHandler::WRITE, 100, 0},
+      {0, 0, 0, 0},
   };
   scheduleEvents(&eb, sp[1], events);
 
@@ -256,8 +260,8 @@ TEST(EventBaseTest, ReadPersist) {
   ASSERT_EQ(handler.log.size(), 3);
   for (int n = 0; n < 3; ++n) {
     ASSERT_EQ(handler.log[n].events, EventHandler::READ);
-    T_CHECK_TIMEOUT(start, handler.log[n].timestamp,
-                    milliseconds(events[n].milliseconds));
+    T_CHECK_TIMEOUT(
+        start, handler.log[n].timestamp, milliseconds(events[n].milliseconds));
     ASSERT_EQ(handler.log[n].bytesRead, events[n].length);
     ASSERT_EQ(handler.log[n].bytesWritten, 0);
   }
@@ -286,8 +290,8 @@ TEST(EventBaseTest, ReadImmediate) {
 
   // Register a timeout to perform another write
   ScheduledEvent events[] = {
-    { 10, EventHandler::WRITE, 2345, 0 },
-    { 0, 0, 0, 0 },
+      {10, EventHandler::WRITE, 2345, 0},
+      {0, 0, 0, 0},
   };
   scheduleEvents(&eb, sp[1], events);
 
@@ -309,8 +313,8 @@ TEST(EventBaseTest, ReadImmediate) {
 
   // There should be another event after the timeout wrote more data
   ASSERT_EQ(handler.log[1].events, EventHandler::READ);
-  T_CHECK_TIMEOUT(start, handler.log[1].timestamp,
-                  milliseconds(events[0].milliseconds));
+  T_CHECK_TIMEOUT(
+      start, handler.log[1].timestamp, milliseconds(events[0].milliseconds));
   ASSERT_EQ(handler.log[1].bytesRead, events[0].length);
   ASSERT_EQ(handler.log[1].bytesWritten, 0);
 
@@ -333,9 +337,9 @@ TEST(EventBaseTest, WriteEvent) {
 
   // Register timeouts to perform two reads
   ScheduledEvent events[] = {
-    { 10, EventHandler::READ, 0, 0 },
-    { 60, EventHandler::READ, 0, 0 },
-    { 0, 0, 0, 0 },
+      {10, EventHandler::READ, 0, 0},
+      {60, EventHandler::READ, 0, 0},
+      {0, 0, 0, 0},
   };
   scheduleEvents(&eb, sp[1], events);
 
@@ -348,8 +352,8 @@ TEST(EventBaseTest, WriteEvent) {
   // have only been able to write once, then unregistered itself.
   ASSERT_EQ(handler.log.size(), 1);
   ASSERT_EQ(handler.log[0].events, EventHandler::WRITE);
-  T_CHECK_TIMEOUT(start, handler.log[0].timestamp,
-                  milliseconds(events[0].milliseconds));
+  T_CHECK_TIMEOUT(
+      start, handler.log[0].timestamp, milliseconds(events[0].milliseconds));
   ASSERT_EQ(handler.log[0].bytesRead, 0);
   ASSERT_GT(handler.log[0].bytesWritten, 0);
   T_CHECK_TIMEOUT(start, end, milliseconds(events[1].milliseconds));
@@ -374,11 +378,11 @@ TEST(EventBaseTest, WritePersist) {
 
   // Register several timeouts to read from the socket at several intervals
   ScheduledEvent events[] = {
-    { 10,  EventHandler::READ, 0, 0 },
-    { 40,  EventHandler::READ, 0, 0 },
-    { 70,  EventHandler::READ, 0, 0 },
-    { 100, EventHandler::READ, 0, 0 },
-    { 0, 0, 0, 0 },
+      {10, EventHandler::READ, 0, 0},
+      {40, EventHandler::READ, 0, 0},
+      {70, EventHandler::READ, 0, 0},
+      {100, EventHandler::READ, 0, 0},
+      {0, 0, 0, 0},
   };
   scheduleEvents(&eb, sp[1], events);
 
@@ -396,8 +400,8 @@ TEST(EventBaseTest, WritePersist) {
   ASSERT_EQ(events[0].result, initialBytesWritten);
   for (int n = 0; n < 3; ++n) {
     ASSERT_EQ(handler.log[n].events, EventHandler::WRITE);
-    T_CHECK_TIMEOUT(start, handler.log[n].timestamp,
-                    milliseconds(events[n].milliseconds));
+    T_CHECK_TIMEOUT(
+        start, handler.log[n].timestamp, milliseconds(events[n].milliseconds));
     ASSERT_EQ(handler.log[n].bytesRead, 0);
     ASSERT_GT(handler.log[n].bytesWritten, 0);
     ASSERT_EQ(handler.log[n].bytesWritten, events[n + 1].result);
@@ -418,15 +422,15 @@ TEST(EventBaseTest, WriteImmediate) {
 
   // Register a timeout to perform a read
   ScheduledEvent events[] = {
-    { 10, EventHandler::READ, 0, 0 },
-    { 0, 0, 0, 0 },
+      {10, EventHandler::READ, 0, 0},
+      {0, 0, 0, 0},
   };
   scheduleEvents(&eb, sp[1], events);
 
   // Schedule a timeout to unregister the handler
   int64_t unregisterTimeout = 40;
-  eb.tryRunAfterDelay(std::bind(&TestHandler::unregisterHandler, &handler),
-                   unregisterTimeout);
+  eb.tryRunAfterDelay(
+      std::bind(&TestHandler::unregisterHandler, &handler), unregisterTimeout);
 
   // Loop
   TimePoint start;
@@ -444,8 +448,8 @@ TEST(EventBaseTest, WriteImmediate) {
 
   // There should be another event after the timeout wrote more data
   ASSERT_EQ(handler.log[1].events, EventHandler::WRITE);
-  T_CHECK_TIMEOUT(start, handler.log[1].timestamp,
-                  milliseconds(events[0].milliseconds));
+  T_CHECK_TIMEOUT(
+      start, handler.log[1].timestamp, milliseconds(events[0].milliseconds));
   ASSERT_EQ(handler.log[1].bytesRead, 0);
   ASSERT_GT(handler.log[1].bytesWritten, 0);
 
@@ -468,9 +472,9 @@ TEST(EventBaseTest, ReadWrite) {
 
   // Register timeouts to perform a write then a read.
   ScheduledEvent events[] = {
-    { 10, EventHandler::WRITE, 2345, 0 },
-    { 40, EventHandler::READ, 0, 0 },
-    { 0, 0, 0, 0 },
+      {10, EventHandler::WRITE, 2345, 0},
+      {40, EventHandler::READ, 0, 0},
+      {0, 0, 0, 0},
   };
   scheduleEvents(&eb, sp[1], events);
 
@@ -484,8 +488,8 @@ TEST(EventBaseTest, ReadWrite) {
   // one event was logged.
   ASSERT_EQ(handler.log.size(), 1);
   ASSERT_EQ(handler.log[0].events, EventHandler::READ);
-  T_CHECK_TIMEOUT(start, handler.log[0].timestamp,
-                  milliseconds(events[0].milliseconds));
+  T_CHECK_TIMEOUT(
+      start, handler.log[0].timestamp, milliseconds(events[0].milliseconds));
   ASSERT_EQ(handler.log[0].bytesRead, events[0].length);
   ASSERT_EQ(handler.log[0].bytesWritten, 0);
   ASSERT_EQ(events[1].result, sock0WriteLength);
@@ -509,9 +513,9 @@ TEST(EventBaseTest, WriteRead) {
   // Register timeouts to perform a read then a write.
   size_t sock1WriteLength = 2345;
   ScheduledEvent events[] = {
-    { 10, EventHandler::READ, 0, 0 },
-    { 40, EventHandler::WRITE, sock1WriteLength, 0 },
-    { 0, 0, 0, 0 },
+      {10, EventHandler::READ, 0, 0},
+      {40, EventHandler::WRITE, sock1WriteLength, 0},
+      {0, 0, 0, 0},
   };
   scheduleEvents(&eb, sp[1], events);
 
@@ -525,8 +529,8 @@ TEST(EventBaseTest, WriteRead) {
   // one event was logged.
   ASSERT_EQ(handler.log.size(), 1);
   ASSERT_EQ(handler.log[0].events, EventHandler::WRITE);
-  T_CHECK_TIMEOUT(start, handler.log[0].timestamp,
-                  milliseconds(events[0].milliseconds));
+  T_CHECK_TIMEOUT(
+      start, handler.log[0].timestamp, milliseconds(events[0].milliseconds));
   ASSERT_EQ(handler.log[0].bytesRead, 0);
   ASSERT_GT(handler.log[0].bytesWritten, 0);
   ASSERT_EQ(events[0].result, sock0WriteLength);
@@ -555,8 +559,8 @@ TEST(EventBaseTest, ReadWriteSimultaneous) {
 
   // Register a timeout to perform a read and write together
   ScheduledEvent events[] = {
-    { 10, EventHandler::READ | EventHandler::WRITE, 0, 0 },
-    { 0, 0, 0, 0 },
+      {10, EventHandler::READ | EventHandler::WRITE, 0, 0},
+      {0, 0, 0, 0},
   };
   scheduleEvents(&eb, sp[1], events);
 
@@ -571,10 +575,9 @@ TEST(EventBaseTest, ReadWriteSimultaneous) {
   // considered breaking the API.  However for now it's nice to exercise this
   // code path.
   ASSERT_EQ(handler.log.size(), 1);
-  ASSERT_EQ(handler.log[0].events,
-                    EventHandler::READ | EventHandler::WRITE);
-  T_CHECK_TIMEOUT(start, handler.log[0].timestamp,
-                  milliseconds(events[0].milliseconds));
+  ASSERT_EQ(handler.log[0].events, EventHandler::READ | EventHandler::WRITE);
+  T_CHECK_TIMEOUT(
+      start, handler.log[0].timestamp, milliseconds(events[0].milliseconds));
   ASSERT_EQ(handler.log[0].bytesRead, sock0WriteLength);
   ASSERT_GT(handler.log[0].bytesWritten, 0);
   T_CHECK_TIMEOUT(start, end, milliseconds(events[0].milliseconds));
@@ -589,18 +592,18 @@ TEST(EventBaseTest, ReadWritePersist) {
 
   // Register for read and write events
   TestHandler handler(&eb, sp[0]);
-  handler.registerHandler(EventHandler::READ | EventHandler::WRITE |
-                          EventHandler::PERSIST);
+  handler.registerHandler(
+      EventHandler::READ | EventHandler::WRITE | EventHandler::PERSIST);
 
   // Register timeouts to perform several reads and writes
   ScheduledEvent events[] = {
-    { 10, EventHandler::WRITE, 2345, 0 },
-    { 20, EventHandler::READ, 0, 0 },
-    { 35, EventHandler::WRITE, 200, 0 },
-    { 45, EventHandler::WRITE, 15, 0 },
-    { 55, EventHandler::READ, 0, 0 },
-    { 120, EventHandler::WRITE, 2345, 0 },
-    { 0, 0, 0, 0 },
+      {10, EventHandler::WRITE, 2345, 0},
+      {20, EventHandler::READ, 0, 0},
+      {35, EventHandler::WRITE, 200, 0},
+      {45, EventHandler::WRITE, 15, 0},
+      {55, EventHandler::READ, 0, 0},
+      {120, EventHandler::WRITE, 2345, 0},
+      {0, 0, 0, 0},
   };
   scheduleEvents(&eb, sp[1], events);
 
@@ -624,8 +627,8 @@ TEST(EventBaseTest, ReadWritePersist) {
   // Events 1 through 5 should correspond to the scheduled events
   for (int n = 1; n < 6; ++n) {
     ScheduledEvent* event = &events[n - 1];
-    T_CHECK_TIMEOUT(start, handler.log[n].timestamp,
-                    milliseconds(event->milliseconds));
+    T_CHECK_TIMEOUT(
+        start, handler.log[n].timestamp, milliseconds(event->milliseconds));
     if (event->events == EventHandler::READ) {
       ASSERT_EQ(handler.log[n].events, EventHandler::WRITE);
       ASSERT_EQ(handler.log[n].bytesRead, 0);
@@ -643,11 +646,10 @@ TEST(EventBaseTest, ReadWritePersist) {
   ASSERT_EQ(bytesRemaining, events[5].length);
 }
 
-
 class PartialReadHandler : public TestHandler {
  public:
   PartialReadHandler(EventBase* eventBase, int fd, size_t readLength)
-    : TestHandler(eventBase, fd), fd_(fd), readLength_(readLength) {}
+      : TestHandler(eventBase, fd), fd_(fd), readLength_(readLength) {}
 
   void handlerReady(uint16_t events) noexcept override {
     assert(events == EventHandler::READ);
@@ -677,8 +679,8 @@ TEST(EventBaseTest, ReadPartial) {
   // Register a timeout to perform a single write,
   // with more data than PartialReadHandler will read at once
   ScheduledEvent events[] = {
-    { 10, EventHandler::WRITE, (3*readLength) + (readLength / 2), 0 },
-    { 0, 0, 0, 0 },
+      {10, EventHandler::WRITE, (3 * readLength) + (readLength / 2), 0},
+      {0, 0, 0, 0},
   };
   scheduleEvents(&eb, sp[1], events);
 
@@ -695,24 +697,23 @@ TEST(EventBaseTest, ReadPartial) {
   // The first 3 invocations should read readLength bytes each
   for (int n = 0; n < 3; ++n) {
     ASSERT_EQ(handler.log[n].events, EventHandler::READ);
-    T_CHECK_TIMEOUT(start, handler.log[n].timestamp,
-                    milliseconds(events[0].milliseconds));
+    T_CHECK_TIMEOUT(
+        start, handler.log[n].timestamp, milliseconds(events[0].milliseconds));
     ASSERT_EQ(handler.log[n].bytesRead, readLength);
     ASSERT_EQ(handler.log[n].bytesWritten, 0);
   }
   // The last read only has readLength/2 bytes
   ASSERT_EQ(handler.log[3].events, EventHandler::READ);
-  T_CHECK_TIMEOUT(start, handler.log[3].timestamp,
-                  milliseconds(events[0].milliseconds));
+  T_CHECK_TIMEOUT(
+      start, handler.log[3].timestamp, milliseconds(events[0].milliseconds));
   ASSERT_EQ(handler.log[3].bytesRead, readLength / 2);
   ASSERT_EQ(handler.log[3].bytesWritten, 0);
 }
 
-
 class PartialWriteHandler : public TestHandler {
  public:
   PartialWriteHandler(EventBase* eventBase, int fd, size_t writeLength)
-    : TestHandler(eventBase, fd), fd_(fd), writeLength_(writeLength) {}
+      : TestHandler(eventBase, fd), fd_(fd), writeLength_(writeLength) {}
 
   void handlerReady(uint16_t events) noexcept override {
     assert(events == EventHandler::WRITE);
@@ -744,8 +745,8 @@ TEST(EventBaseTest, WritePartial) {
 
   // Register a timeout to read, so that more data can be written
   ScheduledEvent events[] = {
-    { 10, EventHandler::READ, 0, 0 },
-    { 0, 0, 0, 0 },
+      {10, EventHandler::READ, 0, 0},
+      {0, 0, 0, 0},
   };
   scheduleEvents(&eb, sp[1], events);
 
@@ -766,13 +767,12 @@ TEST(EventBaseTest, WritePartial) {
   // The first 3 invocations should read writeLength bytes each
   for (int n = 0; n < numChecked; ++n) {
     ASSERT_EQ(handler.log[n].events, EventHandler::WRITE);
-    T_CHECK_TIMEOUT(start, handler.log[n].timestamp,
-                    milliseconds(events[0].milliseconds));
+    T_CHECK_TIMEOUT(
+        start, handler.log[n].timestamp, milliseconds(events[0].milliseconds));
     ASSERT_EQ(handler.log[n].bytesRead, 0);
     ASSERT_EQ(handler.log[n].bytesWritten, writeLength);
   }
 }
-
 
 /**
  * Test destroying a registered EventHandler
@@ -781,10 +781,11 @@ TEST(EventBaseTest, DestroyHandler) {
   class DestroyHandler : public AsyncTimeout {
    public:
     DestroyHandler(EventBase* eb, EventHandler* h)
-      : AsyncTimeout(eb)
-      , handler_(h) {}
+        : AsyncTimeout(eb), handler_(h) {}
 
-    void timeoutExpired() noexcept override { delete handler_; }
+    void timeoutExpired() noexcept override {
+      delete handler_;
+    }
 
    private:
     EventHandler* handler_;
@@ -802,8 +803,8 @@ TEST(EventBaseTest, DestroyHandler) {
 
   // After 10ms, read some data, so that the handler
   // will be notified that it can write.
-  eb.tryRunAfterDelay(std::bind(checkReadUntilEmpty, sp[1], initialBytesWritten),
-                   10);
+  eb.tryRunAfterDelay(
+      std::bind(checkReadUntilEmpty, sp[1], initialBytesWritten), 10);
 
   // Start a timer to destroy the handler after 25ms
   // This mainly just makes sure the code doesn't break or assert
@@ -823,7 +824,6 @@ TEST(EventBaseTest, DestroyHandler) {
   size_t bytesRemaining = readUntilEmpty(sp[1]);
   ASSERT_GT(bytesRemaining, 0);
 }
-
 
 ///////////////////////////////////////////////////////////////////////////
 // Tests for timeout events
@@ -894,10 +894,11 @@ TEST(EventBaseTest, RunAfterDelayDestruction) {
 class TestTimeout : public AsyncTimeout {
  public:
   explicit TestTimeout(EventBase* eventBase)
-    : AsyncTimeout(eventBase)
-    , timestamp(false) {}
+      : AsyncTimeout(eventBase), timestamp(false) {}
 
-  void timeoutExpired() noexcept override { timestamp.reset(); }
+  void timeoutExpired() noexcept override {
+    timestamp.reset();
+  }
 
   TimePoint timestamp;
 };
@@ -925,9 +926,7 @@ TEST(EventBaseTest, BasicTimeouts) {
 class ReschedulingTimeout : public AsyncTimeout {
  public:
   ReschedulingTimeout(EventBase* evb, const vector<uint32_t>& timeouts)
-    : AsyncTimeout(evb)
-    , timeouts_(timeouts)
-    , iterator_(timeouts_.begin()) {}
+      : AsyncTimeout(evb), timeouts_(timeouts), iterator_(timeouts_.begin()) {}
 
   void start() {
     reschedule();
@@ -999,7 +998,7 @@ TEST(EventBaseTest, RescheduleTimeout) {
   t2.scheduleTimeout(30);
   t3.scheduleTimeout(30);
 
-  auto f = static_cast<bool(AsyncTimeout::*)(uint32_t)>(
+  auto f = static_cast<bool (AsyncTimeout::*)(uint32_t)>(
       &AsyncTimeout::scheduleTimeout);
 
   // after 10ms, reschedule t2 to run sooner than originally scheduled
@@ -1049,10 +1048,11 @@ TEST(EventBaseTest, DestroyTimeout) {
   class DestroyTimeout : public AsyncTimeout {
    public:
     DestroyTimeout(EventBase* eb, AsyncTimeout* t)
-      : AsyncTimeout(eb)
-      , timeout_(t) {}
+        : AsyncTimeout(eb), timeout_(t) {}
 
-    void timeoutExpired() noexcept override { delete timeout_; }
+    void timeoutExpired() noexcept override {
+      delete timeout_;
+    }
 
    private:
     AsyncTimeout* timeout_;
@@ -1129,23 +1129,18 @@ TEST(EventBaseTest, ScheduledFnAt) {
 
 struct RunInThreadData {
   RunInThreadData(int numThreads, int opsPerThread_)
-    : opsPerThread(opsPerThread_)
-    , opsToGo(numThreads*opsPerThread) {}
+      : opsPerThread(opsPerThread_), opsToGo(numThreads * opsPerThread) {}
 
   EventBase evb;
-  deque< pair<int, int> > values;
+  deque<pair<int, int>> values;
 
   int opsPerThread;
   int opsToGo;
 };
 
 struct RunInThreadArg {
-  RunInThreadArg(RunInThreadData* data_,
-                 int threadId,
-                 int value_)
-    : data(data_)
-    , thread(threadId)
-    , value(value_) {}
+  RunInThreadArg(RunInThreadData* data_, int threadId, int value_)
+      : data(data_), thread(threadId), value(value_) {}
 
   RunInThreadData* data;
   int thread;
@@ -1157,7 +1152,7 @@ void runInThreadTestFunc(RunInThreadArg* arg) {
   RunInThreadData* data = arg->data;
   delete arg;
 
-  if(--data->opsToGo == 0) {
+  if (--data->opsToGo == 0) {
     // Break out of the event base loop if we are the last thread running
     data->evb.terminateLoopSoon();
   }
@@ -1178,12 +1173,12 @@ TEST(EventBaseTest, RunInThread) {
 
   for (uint32_t i = 0; i < numThreads; ++i) {
     threads.emplace_back([i, &data] {
-        for (int n = 0; n < data.opsPerThread; ++n) {
-          RunInThreadArg* arg = new RunInThreadArg(&data, i, n);
-          data.evb.runInEventBaseThread(runInThreadTestFunc, arg);
-          usleep(10);
-        }
-      });
+      for (int n = 0; n < data.opsPerThread; ++n) {
+        RunInThreadArg* arg = new RunInThreadArg(&data, i, n);
+        data.evb.runInEventBaseThread(runInThreadTestFunc, arg);
+        usleep(10);
+      }
+    });
   }
 
   // Add a timeout event to run after 3 seconds.
@@ -1191,8 +1186,8 @@ TEST(EventBaseTest, RunInThread) {
   // Once the last thread exits, it will stop the loop().  However, this
   // timeout also stops the loop in case there is a bug performing the normal
   // stop.
-  data.evb.tryRunAfterDelay(std::bind(&EventBase::terminateLoopSoon, &data.evb),
-                         3000);
+  data.evb.tryRunAfterDelay(
+      std::bind(&EventBase::terminateLoopSoon, &data.evb), 3000);
 
   TimePoint start;
   data.evb.loop();
@@ -1203,8 +1198,8 @@ TEST(EventBaseTest, RunInThread) {
   // Assert that it happens in under a second.  (This is still tons of extra
   // padding.)
 
-  auto timeTaken = std::chrono::duration_cast<milliseconds>(
-    end.getTime() - start.getTime());
+  auto timeTaken =
+      std::chrono::duration_cast<milliseconds>(end.getTime() - start.getTime());
   ASSERT_LT(timeTaken.count(), 1000);
   VLOG(11) << "Time taken: " << timeTaken.count();
 
@@ -1213,7 +1208,7 @@ TEST(EventBaseTest, RunInThread) {
   for (uint32_t n = 0; n < numThreads; ++n) {
     expectedValues[n] = 0;
   }
-  for (deque< pair<int, int> >::const_iterator it = data.values.begin();
+  for (deque<pair<int, int>>::const_iterator it = data.values.begin();
        it != data.values.end();
        ++it) {
     int threadID = it->first;
@@ -1274,9 +1269,7 @@ TEST(EventBaseTest, RunImmediatelyOrRunInEventBaseThreadAndWaitCross) {
     th.join();
   };
   auto mutated = false;
-  eb.runImmediatelyOrRunInEventBaseThreadAndWait([&] {
-      mutated = true;
-  });
+  eb.runImmediatelyOrRunInEventBaseThreadAndWait([&] { mutated = true; });
   EXPECT_TRUE(mutated);
 }
 
@@ -1288,20 +1281,16 @@ TEST(EventBaseTest, RunImmediatelyOrRunInEventBaseThreadAndWaitWithin) {
     th.join();
   };
   eb.runInEventBaseThreadAndWait([&] {
-      auto mutated = false;
-      eb.runImmediatelyOrRunInEventBaseThreadAndWait([&] {
-          mutated = true;
-      });
-      EXPECT_TRUE(mutated);
+    auto mutated = false;
+    eb.runImmediatelyOrRunInEventBaseThreadAndWait([&] { mutated = true; });
+    EXPECT_TRUE(mutated);
   });
 }
 
 TEST(EventBaseTest, RunImmediatelyOrRunInEventBaseThreadNotLooping) {
   EventBase eb;
   auto mutated = false;
-  eb.runImmediatelyOrRunInEventBaseThreadAndWait([&] {
-      mutated = true;
-    });
+  eb.runImmediatelyOrRunInEventBaseThreadAndWait([&] { mutated = true; });
   EXPECT_TRUE(mutated);
 }
 
@@ -1311,13 +1300,11 @@ TEST(EventBaseTest, RunImmediatelyOrRunInEventBaseThreadNotLooping) {
 
 class CountedLoopCallback : public EventBase::LoopCallback {
  public:
-  CountedLoopCallback(EventBase* eventBase,
-                      unsigned int count,
-                      std::function<void()> action =
-                        std::function<void()>())
-    : eventBase_(eventBase)
-    , count_(count)
-    , action_(action) {}
+  CountedLoopCallback(
+      EventBase* eventBase,
+      unsigned int count,
+      std::function<void()> action = std::function<void()>())
+      : eventBase_(eventBase), count_(count), action_(action) {}
 
   void runLoopCallback() noexcept override {
     --count_;
@@ -1374,8 +1361,8 @@ TEST(EventBaseTest, RunInLoopStopLoop) {
   EventBase eventBase;
 
   CountedLoopCallback c1(&eventBase, 20);
-  CountedLoopCallback c2(&eventBase, 10,
-                         std::bind(&EventBase::terminateLoopSoon, &eventBase));
+  CountedLoopCallback c2(
+      &eventBase, 10, std::bind(&EventBase::terminateLoopSoon, &eventBase));
 
   eventBase.runInLoop(&c1);
   eventBase.runInLoop(&c2);
@@ -1415,14 +1402,12 @@ TEST(EventBaseTest, messageAvailableException) {
 
 TEST(EventBaseTest, TryRunningAfterTerminate) {
   EventBase eventBase;
-  CountedLoopCallback c1(&eventBase, 1,
-                         std::bind(&EventBase::terminateLoopSoon, &eventBase));
+  CountedLoopCallback c1(
+      &eventBase, 1, std::bind(&EventBase::terminateLoopSoon, &eventBase));
   eventBase.runInLoop(&c1);
   eventBase.loopForever();
   bool ran = false;
-  eventBase.runInEventBaseThread([&]() {
-    ran = true;
-  });
+  eventBase.runInEventBaseThread([&]() { ran = true; });
 
   ASSERT_FALSE(ran);
 }
@@ -1436,9 +1421,9 @@ TEST(EventBaseTest, CancelRunInLoop) {
   CountedLoopCallback c3(&eventBase, 20);
 
   std::function<void()> cancelC1Action =
-    std::bind(&EventBase::LoopCallback::cancelLoopCallback, &c1);
+      std::bind(&EventBase::LoopCallback::cancelLoopCallback, &c1);
   std::function<void()> cancelC2Action =
-    std::bind(&EventBase::LoopCallback::cancelLoopCallback, &c2);
+      std::bind(&EventBase::LoopCallback::cancelLoopCallback, &c2);
 
   CountedLoopCallback cancelC1(&eventBase, 10, cancelC1Action);
   CountedLoopCallback cancelC2(&eventBase, 10, cancelC2Action);
@@ -1485,12 +1470,12 @@ class TerminateTestCallback : public EventBase::LoopCallback,
                               public EventHandler {
  public:
   TerminateTestCallback(EventBase* eventBase, int fd)
-    : EventHandler(eventBase, fd),
-      eventBase_(eventBase),
-      loopInvocations_(0),
-      maxLoopInvocations_(0),
-      eventInvocations_(0),
-      maxEventInvocations_(0) {}
+      : EventHandler(eventBase, NetworkSocket::fromFd(fd)),
+        eventBase_(eventBase),
+        loopInvocations_(0),
+        maxLoopInvocations_(0),
+        eventInvocations_(0),
+        maxEventInvocations_(0) {}
 
   void reset(uint32_t maxLoopInvocations, uint32_t maxEventInvocations) {
     loopInvocations_ = 0;
@@ -1575,20 +1560,67 @@ TEST(EventBaseTest, LoopTermination) {
   close(pipeFds[0]);
 }
 
+TEST(EventBaseTest, CallbackOrderTest) {
+  size_t num = 0;
+  EventBase evb;
+
+  evb.runInEventBaseThread([&]() {
+    std::thread t([&]() {
+      evb.runInEventBaseThread([&]() {
+        num++;
+        EXPECT_EQ(num, 2);
+      });
+    });
+    t.join();
+
+    // this callback will run first
+    // even if it is scheduled after the first one
+    evb.runInEventBaseThread([&]() {
+      num++;
+      EXPECT_EQ(num, 1);
+    });
+  });
+
+  evb.loop();
+  EXPECT_EQ(num, 2);
+}
+
+TEST(EventBaseTest, AlwaysEnqueueCallbackOrderTest) {
+  size_t num = 0;
+  EventBase evb;
+
+  evb.runInEventBaseThread([&]() {
+    std::thread t([&]() {
+      evb.runInEventBaseThreadAlwaysEnqueue([&]() {
+        num++;
+        EXPECT_EQ(num, 1);
+      });
+    });
+    t.join();
+
+    // this callback will run second
+    // since it was enqueued after the first one
+    evb.runInEventBaseThreadAlwaysEnqueue([&]() {
+      num++;
+      EXPECT_EQ(num, 2);
+    });
+  });
+
+  evb.loop();
+  EXPECT_EQ(num, 2);
+}
+
 ///////////////////////////////////////////////////////////////////////////
 // Tests for latency calculations
 ///////////////////////////////////////////////////////////////////////////
 
 class IdleTimeTimeoutSeries : public AsyncTimeout {
-
  public:
-
-  explicit IdleTimeTimeoutSeries(EventBase *base,
-                                 std::deque<std::uint64_t>& timeout) :
-    AsyncTimeout(base),
-    timeouts_(0),
-    timeout_(timeout) {
-      scheduleTimeout(1);
+  explicit IdleTimeTimeoutSeries(
+      EventBase* base,
+      std::deque<std::size_t>& timeout)
+      : AsyncTimeout(base), timeouts_(0), timeout_(timeout) {
+    scheduleTimeout(1);
   }
 
   ~IdleTimeTimeoutSeries() override {}
@@ -1596,10 +1628,10 @@ class IdleTimeTimeoutSeries : public AsyncTimeout {
   void timeoutExpired() noexcept override {
     ++timeouts_;
 
-    if(timeout_.empty()){
+    if (timeout_.empty()) {
       cancelTimeout();
     } else {
-      uint64_t sleepTime = timeout_.front();
+      std::size_t sleepTime = timeout_.front();
       timeout_.pop_front();
       if (sleepTime) {
         usleep(sleepTime);
@@ -1614,7 +1646,7 @@ class IdleTimeTimeoutSeries : public AsyncTimeout {
 
  private:
   int timeouts_;
-  std::deque<uint64_t>& timeout_;
+  std::deque<std::size_t>& timeout_;
 };
 
 /**
@@ -1628,11 +1660,11 @@ class IdleTimeTimeoutSeries : public AsyncTimeout {
  */
 TEST(EventBaseTest, IdleTime) {
   EventBase eventBase;
-  std::deque<uint64_t> timeouts0(4, 8080);
+  std::deque<std::size_t> timeouts0(4, 8080);
   timeouts0.push_front(8000);
   timeouts0.push_back(14000);
   IdleTimeTimeoutSeries tos0(&eventBase, timeouts0);
-  std::deque<uint64_t> timeouts(20, 20);
+  std::deque<std::size_t> timeouts(20, 20);
   std::unique_ptr<IdleTimeTimeoutSeries> tos;
   bool hostOverloaded = false;
 
@@ -1693,15 +1725,13 @@ TEST(EventBaseTest, ThisLoop) {
   bool runInLoop = false;
   bool runThisLoop = false;
 
-  eb.runInLoop([&](){
-      eb.terminateLoopSoon();
-      eb.runInLoop([&]() {
-          runInLoop = true;
-        });
-      eb.runInLoop([&]() {
-          runThisLoop = true;
-        }, true);
-    }, true);
+  eb.runInLoop(
+      [&]() {
+        eb.terminateLoopSoon();
+        eb.runInLoop([&]() { runInLoop = true; });
+        eb.runInLoop([&]() { runThisLoop = true; }, true);
+      },
+      true);
   eb.loopForever();
 
   // Should not work
@@ -1714,9 +1744,7 @@ TEST(EventBaseTest, EventBaseThreadLoop) {
   EventBase base;
   bool ran = false;
 
-  base.runInEventBaseThread([&](){
-    ran = true;
-  });
+  base.runInEventBaseThread([&]() { ran = true; });
   base.loop();
 
   ASSERT_TRUE(ran);
@@ -1736,9 +1764,7 @@ TEST(EventBaseTest, EventBaseThreadName) {
 
 TEST(EventBaseTest, RunBeforeLoop) {
   EventBase base;
-  CountedLoopCallback cb(&base, 1, [&](){
-    base.terminateLoopSoon();
-  });
+  CountedLoopCallback cb(&base, 1, [&]() { base.terminateLoopSoon(); });
   base.runBeforeLoop(&cb);
   base.loopForever();
   ASSERT_EQ(cb.getCount(), 0);
@@ -1747,9 +1773,7 @@ TEST(EventBaseTest, RunBeforeLoop) {
 TEST(EventBaseTest, RunBeforeLoopWait) {
   EventBase base;
   CountedLoopCallback cb(&base, 1);
-  base.tryRunAfterDelay([&](){
-      base.terminateLoopSoon();
-    }, 500);
+  base.tryRunAfterDelay([&]() { base.terminateLoopSoon(); }, 500);
   base.runBeforeLoop(&cb);
   base.loopForever();
 
@@ -1760,9 +1784,11 @@ TEST(EventBaseTest, RunBeforeLoopWait) {
 class PipeHandler : public EventHandler {
  public:
   PipeHandler(EventBase* eventBase, int fd)
-    : EventHandler(eventBase, fd) {}
+      : EventHandler(eventBase, NetworkSocket::fromFd(fd)) {}
 
-  void handlerReady(uint16_t /* events */) noexcept override { abort(); }
+  void handlerReady(uint16_t /* events */) noexcept override {
+    abort();
+  }
 };
 
 TEST(EventBaseTest, StopBeforeLoop) {
@@ -1793,9 +1819,7 @@ TEST(EventBaseTest, RunCallbacksOnDestruction) {
 
   {
     EventBase base;
-    base.runInEventBaseThread([&](){
-      ran = true;
-    });
+    base.runInEventBaseThread([&]() { ran = true; });
   }
 
   ASSERT_TRUE(ran);
@@ -1805,11 +1829,11 @@ TEST(EventBaseTest, LoopKeepAlive) {
   EventBase evb;
 
   bool done = false;
-  std::thread t([&, loopKeepAlive = evb.getKeepAliveToken() ]() mutable {
+  std::thread t([&, loopKeepAlive = getKeepAliveToken(evb)]() mutable {
     /* sleep override */ std::this_thread::sleep_for(
         std::chrono::milliseconds(100));
     evb.runInEventBaseThread(
-        [&done, loopKeepAlive = std::move(loopKeepAlive) ] { done = true; });
+        [&done, loopKeepAlive = std::move(loopKeepAlive)] { done = true; });
   });
 
   evb.loop();
@@ -1826,11 +1850,11 @@ TEST(EventBaseTest, LoopKeepAliveInLoop) {
   std::thread t;
 
   evb.runInEventBaseThread([&] {
-    t = std::thread([&, loopKeepAlive = evb.getKeepAliveToken() ]() mutable {
+    t = std::thread([&, loopKeepAlive = getKeepAliveToken(evb)]() mutable {
       /* sleep override */ std::this_thread::sleep_for(
           std::chrono::milliseconds(100));
       evb.runInEventBaseThread(
-          [&done, loopKeepAlive = std::move(loopKeepAlive) ] { done = true; });
+          [&done, loopKeepAlive = std::move(loopKeepAlive)] { done = true; });
     });
   });
 
@@ -1854,15 +1878,15 @@ TEST(EventBaseTest, LoopKeepAliveWithLoopForever) {
 
   {
     auto* ev = evb.get();
-    Executor::KeepAlive keepAlive;
+    Executor::KeepAlive<EventBase> keepAlive;
     ev->runInEventBaseThreadAndWait(
-        [&ev, &keepAlive] { keepAlive = ev->getKeepAliveToken(); });
+        [&ev, &keepAlive] { keepAlive = getKeepAliveToken(ev); });
     ASSERT_FALSE(done) << "Loop finished before we asked it to";
     ev->terminateLoopSoon();
     /* sleep override */
     std::this_thread::sleep_for(std::chrono::milliseconds(30));
     ASSERT_FALSE(done) << "Loop terminated early";
-    ev->runInEventBaseThread([keepAlive = std::move(keepAlive)]{});
+    ev->runInEventBaseThread([keepAlive = std::move(keepAlive)] {});
   }
 
   evThread.join();
@@ -1874,15 +1898,13 @@ TEST(EventBaseTest, LoopKeepAliveShutdown) {
 
   bool done = false;
 
-  std::thread t([
-    &done,
-    loopKeepAlive = evb->getKeepAliveToken(),
-    evbPtr = evb.get()
-  ]() mutable {
+  std::thread t([&done,
+                 loopKeepAlive = getKeepAliveToken(evb.get()),
+                 evbPtr = evb.get()]() mutable {
     /* sleep override */ std::this_thread::sleep_for(
         std::chrono::milliseconds(100));
     evbPtr->runInEventBaseThread(
-        [&done, loopKeepAlive = std::move(loopKeepAlive) ] { done = true; });
+        [&done, loopKeepAlive = std::move(loopKeepAlive)] { done = true; });
   });
 
   evb.reset();
@@ -1907,10 +1929,10 @@ TEST(EventBaseTest, LoopKeepAliveAtomic) {
   }
 
   for (size_t i = 0; i < kNumThreads; ++i) {
-    ts.emplace_back([ evbPtr = evb.get(), batonPtr = batons[i].get(), &done ] {
-      std::vector<Executor::KeepAlive> keepAlives;
+    ts.emplace_back([evbPtr = evb.get(), batonPtr = batons[i].get(), &done] {
+      std::vector<Executor::KeepAlive<EventBase>> keepAlives;
       for (size_t j = 0; j < kNumTasks; ++j) {
-        keepAlives.emplace_back(evbPtr->getKeepAliveToken());
+        keepAlives.emplace_back(getKeepAliveToken(evbPtr));
       }
 
       batonPtr->post();
@@ -1919,7 +1941,7 @@ TEST(EventBaseTest, LoopKeepAliveAtomic) {
 
       for (auto& keepAlive : keepAlives) {
         evbPtr->runInEventBaseThread(
-            [&done, keepAlive = std::move(keepAlive) ]() { ++done; });
+            [&done, keepAlive = std::move(keepAlive)]() { ++done; });
       }
     });
   }
@@ -1935,6 +1957,11 @@ TEST(EventBaseTest, LoopKeepAliveAtomic) {
   for (auto& t : ts) {
     t.join();
   }
+}
+
+TEST(EventBaseTest, LoopKeepAliveCast) {
+  EventBase evb;
+  Executor::KeepAlive<> keepAlive = getKeepAliveToken(evb);
 }
 
 TEST(EventBaseTest, DrivableExecutorTest) {
@@ -2016,4 +2043,89 @@ TEST(EventBaseTest, CancelLoopCallbackRequestContextTest) {
   EXPECT_EQ(rctx_weak_ptr.expired(), true);
 
   EXPECT_EQ(defaultCtx, RequestContext::get());
+}
+
+TEST(EventBaseTest, TestStarvation) {
+  EventBase evb;
+  std::promise<void> stopRequested;
+  std::promise<void> stopScheduled;
+  bool stopping{false};
+  std::thread t{[&] {
+    stopRequested.get_future().get();
+    evb.add([&]() { stopping = true; });
+    stopScheduled.set_value();
+  }};
+
+  size_t num{0};
+  std::function<void()> fn;
+  fn = [&]() {
+    if (stopping || num >= 2000) {
+      return;
+    }
+
+    if (++num == 1000) {
+      stopRequested.set_value();
+      stopScheduled.get_future().get();
+    }
+
+    evb.add(fn);
+  };
+
+  evb.add(fn);
+  evb.loop();
+
+  EXPECT_EQ(1000, num);
+  t.join();
+}
+
+TEST(EventBaseTest, RunOnDestructionBasic) {
+  bool ranOnDestruction = false;
+  {
+    EventBase evb;
+    evb.runOnDestruction([&ranOnDestruction] { ranOnDestruction = true; });
+  }
+  EXPECT_TRUE(ranOnDestruction);
+}
+
+TEST(EventBaseTest, RunOnDestructionCancelled) {
+  struct Callback : EventBase::OnDestructionCallback {
+    bool ranOnDestruction{false};
+
+    void onEventBaseDestruction() noexcept final {
+      ranOnDestruction = true;
+    }
+  };
+
+  auto cb = std::make_unique<Callback>();
+  {
+    EventBase evb;
+    evb.runOnDestruction(*cb);
+    EXPECT_TRUE(cb->cancel());
+  }
+  EXPECT_FALSE(cb->ranOnDestruction);
+  EXPECT_FALSE(cb->cancel());
+}
+
+TEST(EventBaseTest, RunOnDestructionAfterHandleDestroyed) {
+  EventBase evb;
+  {
+    bool ranOnDestruction = false;
+    auto* cb = new EventBase::FunctionOnDestructionCallback(
+        [&ranOnDestruction] { ranOnDestruction = true; });
+    evb.runOnDestruction(*cb);
+    EXPECT_TRUE(cb->cancel());
+    delete cb;
+  }
+}
+
+TEST(EventBaseTest, RunOnDestructionAddCallbackWithinCallback) {
+  size_t callbacksCalled = 0;
+  {
+    EventBase evb;
+    evb.runOnDestruction([&] {
+      ++callbacksCalled;
+      evb.runOnDestruction([&] { ++callbacksCalled; });
+    });
+  }
+  EXPECT_EQ(2, callbacksCalled);
 }

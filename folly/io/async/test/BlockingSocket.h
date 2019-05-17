@@ -19,12 +19,13 @@
 #include <folly/io/async/AsyncSSLSocket.h>
 #include <folly/io/async/AsyncSocket.h>
 #include <folly/io/async/SSLContext.h>
+#include <folly/net/NetworkSocket.h>
 
 class BlockingSocket : public folly::AsyncSocket::ConnectCallback,
                        public folly::AsyncTransportWrapper::ReadCallback,
                        public folly::AsyncTransportWrapper::WriteCallback {
  public:
-  explicit BlockingSocket(int fd)
+  explicit BlockingSocket(folly::NetworkSocket fd)
       : sock_(new folly::AsyncSocket(&eventBase_, fd)) {}
 
   BlockingSocket(
@@ -83,8 +84,8 @@ class BlockingSocket : public folly::AsyncSocket::ConnectCallback,
     return readHelper(buf, len, false);
   }
 
-  int getSocketFD() const {
-    return sock_->getFd();
+  folly::NetworkSocket getNetworkSocket() const {
+    return sock_->getNetworkSocket();
   }
 
   folly::AsyncSocket* getSocket() {

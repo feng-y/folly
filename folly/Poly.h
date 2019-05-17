@@ -25,10 +25,6 @@
 
 #pragma once
 
-#if defined(__GNUC__) && !defined(__clang__) && __GNUC__ < 5
-#error Folly.Poly requires gcc-5 or greater
-#endif
-
 #include <cassert>
 #include <new>
 #include <type_traits>
@@ -47,6 +43,7 @@
 #define FOLLY_INLINE_CONSTEXPR inline constexpr
 #endif
 
+#include <folly/PolyException.h>
 #include <folly/detail/PolyDetail.h>
 
 namespace folly {
@@ -172,27 +169,6 @@ template <auto... Ps>
 struct PolyMembers {};
 
 #endif
-
-/**
- * Exception type that is thrown on invalid access of an empty `Poly` object.
- */
-struct FOLLY_EXPORT BadPolyAccess : std::exception {
-  BadPolyAccess() = default;
-  char const* what() const noexcept override {
-    return "BadPolyAccess";
-  }
-};
-
-/**
- * Exception type that is thrown when attempting to extract from a `Poly` a
- * value of the wrong type.
- */
-struct FOLLY_EXPORT BadPolyCast : std::bad_cast {
-  BadPolyCast() = default;
-  char const* what() const noexcept override {
-    return "BadPolyCast";
-  }
-};
 
 /**
  * Used in the definition of a `Poly` interface to say that the current
@@ -353,7 +329,9 @@ template <class T, class I>
 /// \overload
 template <class T, class I>
 [[noreturn]] detail::AddCvrefOf<T, I> const& poly_cast(
-    detail::ArchetypeRoot<I> const&) { assume_unreachable(); }
+    detail::ArchetypeRoot<I> const&) {
+  assume_unreachable();
+}
 /// \endcond
 
 /// \overload
@@ -440,15 +418,13 @@ constexpr bool poly_empty(Poly<I&> const&) noexcept {
  */
 template <
     class I,
-    std::enable_if_t<detail::Not<std::is_reference<I>>::value, int> = 0>
+    std::enable_if_t<Negation<std::is_reference<I>>::value, int> = 0>
 constexpr Poly<I>&& poly_move(detail::PolyRoot<I>& that) noexcept {
   return static_cast<Poly<I>&&>(static_cast<Poly<I>&>(that));
 }
 
 /// \overload
-template <
-    class I,
-    std::enable_if_t<detail::Not<std::is_const<I>>::value, int> = 0>
+template <class I, std::enable_if_t<Negation<std::is_const<I>>::value, int> = 0>
 Poly<I&&> poly_move(detail::PolyRoot<I&> const& that) noexcept {
   return detail::PolyAccess::move(that);
 }

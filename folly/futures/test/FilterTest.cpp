@@ -20,12 +20,13 @@
 using namespace folly;
 
 TEST(Filter, alwaysTrye) {
-  EXPECT_EQ(42, makeFuture(42).filter([](int){ return true; }).get());
+  EXPECT_EQ(42, makeFuture(42).filter([](int) { return true; }).get());
 }
 
 TEST(Filter, alwaysFalse) {
-  EXPECT_THROW(makeFuture(42).filter([](int){ return false; }).get(),
-               folly::PredicateDoesNotObtain);
+  EXPECT_THROW(
+      makeFuture(42).filter([](int) { return false; }).get(),
+      folly::FuturePredicateDoesNotObtain);
 }
 
 TEST(Filter, moveOnlyValue) {

@@ -18,6 +18,8 @@
 
 #include <folly/executors/ThreadPoolExecutor.h>
 
+DECLARE_bool(dynamic_cputhreadpoolexecutor);
+
 namespace folly {
 
 /**
@@ -52,8 +54,6 @@ namespace folly {
  * combination with Lifosem - it almost doesn't matter if more threads than are
  * necessary are specified at startup.
  *
- * @note stop() will finish all outstanding tasks at exit.
- *
  * @note Supports priorities - priorities are implemented as multiple queues -
  * each worker thread checks the highest priority queue first. Threads
  * themselves don't have priorities set, so a series of long running low
@@ -70,10 +70,20 @@ class CPUThreadPoolExecutor : public ThreadPoolExecutor {
       std::shared_ptr<ThreadFactory> threadFactory =
           std::make_shared<NamedThreadFactory>("CPUThreadPool"));
 
+  CPUThreadPoolExecutor(
+      std::pair<size_t, size_t> numThreads,
+      std::unique_ptr<BlockingQueue<CPUTask>> taskQueue,
+      std::shared_ptr<ThreadFactory> threadFactory =
+          std::make_shared<NamedThreadFactory>("CPUThreadPool"));
+
   explicit CPUThreadPoolExecutor(size_t numThreads);
 
   CPUThreadPoolExecutor(
       size_t numThreads,
+      std::shared_ptr<ThreadFactory> threadFactory);
+
+  CPUThreadPoolExecutor(
+      std::pair<size_t, size_t> numThreads,
       std::shared_ptr<ThreadFactory> threadFactory);
 
   CPUThreadPoolExecutor(
@@ -131,7 +141,10 @@ class CPUThreadPoolExecutor : public ThreadPoolExecutor {
  private:
   void threadRun(ThreadPtr thread) override;
   void stopThreads(size_t n) override;
-  uint64_t getPendingTaskCountImpl(const RWSpinLock::ReadHolder&) override;
+  size_t getPendingTaskCountImpl() const override;
+
+  bool tryDecrToStop();
+  bool taskShouldStop(folly::Optional<CPUTask>&);
 
   std::unique_ptr<BlockingQueue<CPUTask>> taskQueue_;
   std::atomic<ssize_t> threadsToStop_{0};

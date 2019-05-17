@@ -16,7 +16,13 @@
 
 #include <folly/container/F14Map.h>
 
+#include <algorithm>
+#include <unordered_map>
+
+#include <glog/logging.h>
+
 #include <folly/Conv.h>
+#include <folly/FBString.h>
 #include <folly/container/test/F14TestUtil.h>
 #include <folly/portability/GTest.h>
 
@@ -46,38 +52,132 @@ TEST(F14Map, customSwap) {
   testCustomSwap<folly::F14FastMap>();
 }
 
-namespace {
 template <
     template <typename, typename, typename, typename, typename> class TMap,
     typename K,
     typename V>
-void testAllocatedMemorySize() {
+void runAllocatedMemorySizeTest() {
   using namespace folly::f14;
+  using namespace folly::f14::detail;
   using A = SwapTrackingAlloc<std::pair<const K, V>>;
 
-  A::resetTracking();
-  TMap<K, V, DefaultHasher<K>, DefaultKeyEqual<K>, A> m;
-  EXPECT_EQ(A::getAllocatedMemorySize(), m.getAllocatedMemorySize());
+  resetTracking();
+  {
+    TMap<K, V, DefaultHasher<K>, DefaultKeyEqual<K>, A> m;
 
-  for (size_t i = 0; i < 1; ++i) {
-    m.insert(std::make_pair(folly::to<K>(i), V{}));
-    EXPECT_EQ(A::getAllocatedMemorySize(), m.getAllocatedMemorySize());
+    // if F14 intrinsics are not available then we fall back to using
+    // std::unordered_map underneath, but in that case the allocation
+    // info is only best effort
+    bool preciseAllocInfo = getF14IntrinsicsMode() != F14IntrinsicsMode::None;
+
+    if (preciseAllocInfo) {
+      EXPECT_EQ(testAllocatedMemorySize, 0);
+      EXPECT_EQ(m.getAllocatedMemorySize(), 0);
+    }
+    auto emptyMapAllocatedMemorySize = testAllocatedMemorySize;
+    auto emptyMapAllocatedBlockCount = testAllocatedBlockCount;
+
+    for (size_t i = 0; i < 1000; ++i) {
+      m.insert(std::make_pair(folly::to<K>(i), V{}));
+      m.erase(folly::to<K>(i / 10 + 2));
+      if (preciseAllocInfo) {
+        EXPECT_EQ(testAllocatedMemorySize, m.getAllocatedMemorySize());
+      }
+      EXPECT_GE(m.getAllocatedMemorySize(), sizeof(std::pair<K, V>) * m.size());
+      std::size_t size = 0;
+      std::size_t count = 0;
+      m.visitAllocationClasses([&](std::size_t, std::size_t) mutable {});
+      m.visitAllocationClasses([&](std::size_t bytes, std::size_t n) {
+        size += bytes * n;
+        count += n;
+      });
+      if (preciseAllocInfo) {
+        EXPECT_EQ(testAllocatedMemorySize, size);
+        EXPECT_EQ(testAllocatedBlockCount, count);
+      }
+    }
+
+    m = decltype(m){};
+    EXPECT_EQ(testAllocatedMemorySize, emptyMapAllocatedMemorySize);
+    EXPECT_EQ(testAllocatedBlockCount, emptyMapAllocatedBlockCount);
+
+    m.reserve(5);
+    EXPECT_GT(testAllocatedMemorySize, 0);
+    m = {};
+    EXPECT_GT(testAllocatedMemorySize, 0);
   }
+  EXPECT_EQ(testAllocatedMemorySize, 0);
+  EXPECT_EQ(testAllocatedBlockCount, 0);
 }
 
 template <typename K, typename V>
-void runAllocatedMemorySizeTest() {
-  testAllocatedMemorySize<folly::F14ValueMap, K, V>();
-  testAllocatedMemorySize<folly::F14NodeMap, K, V>();
-  testAllocatedMemorySize<folly::F14VectorMap, K, V>();
-  testAllocatedMemorySize<folly::F14FastMap, K, V>();
+void runAllocatedMemorySizeTests() {
+  runAllocatedMemorySizeTest<folly::F14ValueMap, K, V>();
+  runAllocatedMemorySizeTest<folly::F14NodeMap, K, V>();
+  runAllocatedMemorySizeTest<folly::F14VectorMap, K, V>();
+  runAllocatedMemorySizeTest<folly::F14FastMap, K, V>();
 }
-} // namespace
 
 TEST(F14Map, getAllocatedMemorySize) {
-  runAllocatedMemorySizeTest<int, int>();
-  runAllocatedMemorySizeTest<std::string, int>();
-  runAllocatedMemorySizeTest<std::string, std::string>();
+  runAllocatedMemorySizeTests<bool, bool>();
+  runAllocatedMemorySizeTests<int, int>();
+  runAllocatedMemorySizeTests<bool, std::string>();
+  runAllocatedMemorySizeTests<double, std::string>();
+  runAllocatedMemorySizeTests<std::string, int>();
+  runAllocatedMemorySizeTests<std::string, std::string>();
+  runAllocatedMemorySizeTests<folly::fbstring, long>();
+}
+
+template <typename M>
+void runVisitContiguousRangesTest(int n) {
+  M map;
+
+  for (int i = 0; i < n; ++i) {
+    map[i] = i;
+    map.erase(i / 2);
+  }
+
+  std::unordered_map<uintptr_t, bool> visited;
+  for (auto& entry : map) {
+    visited[reinterpret_cast<uintptr_t>(&entry)] = false;
+  }
+
+  map.visitContiguousRanges([&](auto b, auto e) {
+    for (auto i = b; i != e; ++i) {
+      auto iter = visited.find(reinterpret_cast<uintptr_t>(i));
+      ASSERT_TRUE(iter != visited.end());
+      EXPECT_FALSE(iter->second);
+      iter->second = true;
+    }
+  });
+
+  // ensure no entries were skipped
+  for (auto& e : visited) {
+    EXPECT_TRUE(e.second);
+  }
+}
+
+template <typename M>
+void runVisitContiguousRangesTest() {
+  runVisitContiguousRangesTest<M>(0); // empty
+  runVisitContiguousRangesTest<M>(5); // single chunk
+  runVisitContiguousRangesTest<M>(1000); // many chunks
+}
+
+TEST(F14ValueMap, visitContiguousRanges) {
+  runVisitContiguousRangesTest<folly::F14ValueMap<int, int>>();
+}
+
+TEST(F14NodeMap, visitContiguousRanges) {
+  runVisitContiguousRangesTest<folly::F14NodeMap<int, int>>();
+}
+
+TEST(F14VectorMap, visitContiguousRanges) {
+  runVisitContiguousRangesTest<folly::F14VectorMap<int, int>>();
+}
+
+TEST(F14FastMap, visitContiguousRanges) {
+  runVisitContiguousRangesTest<folly::F14FastMap<int, int>>();
 }
 
 ///////////////////////////////////
@@ -108,6 +208,17 @@ void runSimple() {
   T h;
 
   EXPECT_EQ(h.size(), 0);
+  h.reserve(0);
+  std::vector<std::pair<std::string const, std::string>> v(
+      {{"abc", "first"}, {"abc", "second"}});
+  h.insert(v.begin(), v.begin());
+  EXPECT_EQ(h.size(), 0);
+  EXPECT_EQ(h.bucket_count(), 0);
+  h.insert(v.begin(), v.end());
+  EXPECT_EQ(h.size(), 1);
+  EXPECT_EQ(h["abc"], s("first"));
+  h = T{};
+  EXPECT_EQ(h.bucket_count(), 0);
 
   h.insert(std::make_pair(s("abc"), s("ABC")));
   EXPECT_TRUE(h.find(s("def")) == h.end());
@@ -141,7 +252,7 @@ void runSimple() {
   EXPECT_TRUE(h3.find(s("xxx")) == h3.end());
 
   for (uint64_t i = 0; i < 1000; ++i) {
-    h[std::to_string(i * i * i)] = s("x");
+    h[to<std::string>(i * i * i)] = s("x");
     EXPECT_EQ(h.size(), i + 1);
   }
   {
@@ -149,10 +260,10 @@ void runSimple() {
     swap(h, h2);
   }
   for (uint64_t i = 0; i < 1000; ++i) {
-    EXPECT_TRUE(h2.find(std::to_string(i * i * i)) != h2.end());
+    EXPECT_TRUE(h2.find(to<std::string>(i * i * i)) != h2.end());
     EXPECT_EQ(
-        h2.find(std::to_string(i * i * i))->first, std::to_string(i * i * i));
-    EXPECT_TRUE(h2.find(std::to_string(i * i * i + 2)) == h2.end());
+        h2.find(to<std::string>(i * i * i))->first, to<std::string>(i * i * i));
+    EXPECT_TRUE(h2.find(to<std::string>(i * i * i + 2)) == h2.end());
   }
 
   T h4{h2};
@@ -168,6 +279,8 @@ void runSimple() {
   EXPECT_EQ(h8.size(), 2);
   EXPECT_EQ(h8.count(s("abc")), 1);
   EXPECT_EQ(h8.count(s("xyz")), 0);
+  EXPECT_TRUE(h8.contains(s("abc")));
+  EXPECT_FALSE(h8.contains(s("xyz")));
 
   EXPECT_TRUE(h7 != h8);
   EXPECT_TRUE(h8 != h9);
@@ -180,11 +293,15 @@ void runSimple() {
   EXPECT_TRUE(h2.empty());
   EXPECT_TRUE(h7.empty());
   for (uint64_t i = 0; i < 1000; ++i) {
-    auto k = std::to_string(i * i * i);
+    auto k = to<std::string>(i * i * i);
     EXPECT_EQ(h4.count(k), 1);
     EXPECT_EQ(h5.count(k), 1);
     EXPECT_EQ(h6.count(k), 1);
     EXPECT_EQ(h8.count(k), 1);
+    EXPECT_TRUE(h4.contains(k));
+    EXPECT_TRUE(h5.contains(k));
+    EXPECT_TRUE(h6.contains(k));
+    EXPECT_TRUE(h8.contains(k));
   }
 
   EXPECT_TRUE(h2 == h7);
@@ -192,6 +309,20 @@ void runSimple() {
 
   EXPECT_EQ(h3.at(s("ghi")), s("GHI"));
   EXPECT_THROW(h3.at(s("abc")), std::out_of_range);
+
+  h8.clear();
+  h8.emplace(s("abc"), s("ABC"));
+  EXPECT_GE(h8.bucket_count(), 1);
+  h8 = {};
+  EXPECT_GE(h8.bucket_count(), 1);
+  h9 = {{s("abc"), s("ABD")}, {s("def"), s("DEF")}};
+  EXPECT_TRUE(h8.empty());
+  EXPECT_EQ(h9.size(), 2);
+
+  auto expectH8 = [&h8](T& ref) { EXPECT_EQ(&ref, &h8); };
+  expectH8((h8 = h2));
+  expectH8((h8 = std::move(h2)));
+  expectH8((h8 = {}));
 
   F14TableStats::compute(h);
   F14TableStats::compute(h2);
@@ -205,12 +336,38 @@ void runSimple() {
 }
 
 template <typename T>
+void runEraseWhileIterating() {
+  constexpr int kNumElements = 1000;
+
+  // mul and kNumElements should be relatively prime
+  for (int mul : {1, 3, 17, 137, kNumElements - 1}) {
+    for (int interval : {1, 3, 5, kNumElements / 2}) {
+      T h;
+      for (auto i = 0; i < kNumElements; ++i) {
+        EXPECT_TRUE(h.emplace((i * mul) % kNumElements, i).second);
+      }
+
+      int sum = 0;
+      for (auto it = h.begin(); it != h.end();) {
+        sum += it->second;
+        if (it->first % interval == 0) {
+          it = h.erase(it);
+        } else {
+          ++it;
+        }
+      }
+      EXPECT_EQ(kNumElements * (kNumElements - 1) / 2, sum);
+    }
+  }
+}
+
+template <typename T>
 void runRehash() {
   unsigned n = 10000;
   T h;
   auto b = h.bucket_count();
   for (unsigned i = 0; i < n; ++i) {
-    h.insert(std::make_pair(std::to_string(i), s("")));
+    h.insert(std::make_pair(to<std::string>(i), s("")));
     if (b != h.bucket_count()) {
       F14TableStats::compute(h);
       b = h.bucket_count();
@@ -220,196 +377,268 @@ void runRehash() {
   F14TableStats::compute(h);
 }
 
-// T should be a map from uint64_t to uint64_t
+// T should be a map from uint64_t to Tracked<1> that uses SwapTrackingAlloc
 template <typename T>
 void runRandom() {
-  using R = std::unordered_map<uint64_t, uint64_t>;
+  using R = std::unordered_map<uint64_t, Tracked<2>>;
+
+  resetTracking();
 
   std::mt19937_64 gen(0);
   std::uniform_int_distribution<> pctDist(0, 100);
   std::uniform_int_distribution<uint64_t> bitsBitsDist(1, 6);
-  T t0;
-  T t1;
-  R r0;
-  R r1;
+  {
+    T t0;
+    T t1;
+    R r0;
+    R r1;
+    std::size_t rollbacks = 0;
+    std::size_t resizingSmallRollbacks = 0;
+    std::size_t resizingLargeRollbacks = 0;
 
-  for (std::size_t reps = 0; reps < 10000; ++reps) {
-    // discardBits will be from 0 to 62
-    auto discardBits = (uint64_t{1} << bitsBitsDist(gen)) - 2;
-    auto k = gen() >> discardBits;
-    auto v = gen();
-    auto pct = pctDist(gen);
+    for (std::size_t reps = 0; reps < 100000 || rollbacks < 10 ||
+         resizingSmallRollbacks < 1 || resizingLargeRollbacks < 1;
+         ++reps) {
+      if (pctDist(gen) < 20) {
+        // 10% chance allocator will fail after 0 to 3 more allocations
+        limitTestAllocations(gen() & 3);
+      } else {
+        unlimitTestAllocations();
+      }
+      bool leakCheckOnly = false;
 
-    EXPECT_EQ(t0.empty(), r0.empty());
-    EXPECT_EQ(t0.size(), r0.size());
-    if (pct < 15) {
-      // insert
-      auto t = t0.insert(std::make_pair(k, v));
-      auto r = r0.insert(std::make_pair(k, v));
-      EXPECT_EQ(*t.first, *r.first);
-      EXPECT_EQ(t.second, r.second);
-    } else if (pct < 25) {
-      // emplace
-      auto t = t0.emplace(k, v);
-      auto r = r0.emplace(k, v);
-      EXPECT_EQ(*t.first, *r.first);
-      EXPECT_EQ(t.second, r.second);
-    } else if (pct < 30) {
-      // bulk insert
-      t0.insert(r1.begin(), r1.end());
-      r0.insert(r1.begin(), r1.end());
-    } else if (pct < 40) {
-      // erase by key
-      auto t = t0.erase(k);
-      auto r = r0.erase(k);
-      EXPECT_EQ(t, r);
-    } else if (pct < 47) {
-      // erase by iterator
-      if (t0.size() > 0) {
-        auto r = r0.find(k);
-        if (r == r0.end()) {
-          r = r0.begin();
+      // discardBits will be from 0 to 62
+      auto discardBits = (uint64_t{1} << bitsBitsDist(gen)) - 2;
+      auto k = gen() >> discardBits;
+      auto v = gen();
+      auto pct = pctDist(gen);
+
+      try {
+        EXPECT_EQ(t0.empty(), r0.empty());
+        EXPECT_EQ(t0.size(), r0.size());
+        EXPECT_EQ(2, Tracked<0>::counts.liveCount());
+        EXPECT_EQ(t0.size() + t1.size(), Tracked<1>::counts.liveCount());
+        EXPECT_EQ(r0.size() + r1.size(), Tracked<2>::counts.liveCount());
+        if (pct < 15) {
+          // insert
+          auto t = t0.insert(std::make_pair(k, v));
+          auto r = r0.insert(std::make_pair(k, v));
+          EXPECT_EQ(t.first->first, r.first->first);
+          EXPECT_EQ(t.first->second.val_, r.first->second.val_);
+          EXPECT_EQ(t.second, r.second);
+        } else if (pct < 25) {
+          // emplace
+          auto t = t0.emplace(k, v);
+          auto r = r0.emplace(k, v);
+          EXPECT_EQ(t.first->first, r.first->first);
+          EXPECT_EQ(t.first->second.val_, r.first->second.val_);
+          EXPECT_EQ(t.second, r.second);
+        } else if (pct < 30) {
+          // bulk insert
+          leakCheckOnly = true;
+          t0.insert(t1.begin(), t1.end());
+          r0.insert(r1.begin(), r1.end());
+        } else if (pct < 40) {
+          // erase by key
+          auto t = t0.erase(k);
+          auto r = r0.erase(k);
+          EXPECT_EQ(t, r);
+        } else if (pct < 47) {
+          // erase by iterator
+          if (t0.size() > 0) {
+            auto r = r0.find(k);
+            if (r == r0.end()) {
+              r = r0.begin();
+            }
+            k = r->first;
+            auto t = t0.find(k);
+            t = t0.erase(t);
+            if (t != t0.end()) {
+              EXPECT_NE(t->first, k);
+            }
+            r = r0.erase(r);
+            if (r != r0.end()) {
+              EXPECT_NE(r->first, k);
+            }
+          }
+        } else if (pct < 50) {
+          // bulk erase
+          if (t0.size() > 0) {
+            auto r = r0.find(k);
+            if (r == r0.end()) {
+              r = r0.begin();
+            }
+            k = r->first;
+            auto t = t0.find(k);
+            auto firstt = t;
+            auto lastt = ++t;
+            t = t0.erase(firstt, lastt);
+            if (t != t0.end()) {
+              EXPECT_NE(t->first, k);
+            }
+            auto firstr = r;
+            auto lastr = ++r;
+            r = r0.erase(firstr, lastr);
+            if (r != r0.end()) {
+              EXPECT_NE(r->first, k);
+            }
+          }
+        } else if (pct < 58) {
+          // find
+          auto t = t0.find(k);
+          auto r = r0.find(k);
+          EXPECT_EQ((t == t0.end()), (r == r0.end()));
+          if (t != t0.end() && r != r0.end()) {
+            EXPECT_EQ(t->first, r->first);
+            EXPECT_EQ(t->second.val_, r->second.val_);
+          }
+          EXPECT_EQ(t0.count(k), r0.count(k));
+          // TODO: When std::unordered_map supports c++20:
+          // EXPECT_EQ(t0.contains(k), r0.contains(k));
+        } else if (pct < 60) {
+          // equal_range
+          auto t = t0.equal_range(k);
+          auto r = r0.equal_range(k);
+          EXPECT_EQ((t.first == t.second), (r.first == r.second));
+          if (t.first != t.second && r.first != r.second) {
+            EXPECT_EQ(t.first->first, r.first->first);
+            EXPECT_EQ(t.first->second.val_, r.first->second.val_);
+            t.first++;
+            r.first++;
+            EXPECT_TRUE(t.first == t.second);
+            EXPECT_TRUE(r.first == r.second);
+          }
+        } else if (pct < 65) {
+          // iterate
+          uint64_t t = 0;
+          for (auto& e : t0) {
+            t += e.first * 37 + e.second.val_ + 1000;
+          }
+          uint64_t r = 0;
+          for (auto& e : r0) {
+            r += e.first * 37 + e.second.val_ + 1000;
+          }
+          EXPECT_EQ(t, r);
+        } else if (pct < 69) {
+          // swap
+          using std::swap;
+          swap(t0, t1);
+          swap(r0, r1);
+        } else if (pct < 70) {
+          // swap
+          t0.swap(t1);
+          r0.swap(r1);
+        } else if (pct < 72) {
+          // default construct
+          t0.~T();
+          new (&t0) T();
+          r0.~R();
+          new (&r0) R();
+        } else if (pct < 74) {
+          // default construct with capacity
+          std::size_t capacity = k & 0xffff;
+          T t(capacity);
+          t0 = std::move(t);
+          R r(capacity);
+          r0 = std::move(r);
+        } else if (pct < 80) {
+          // bulk iterator construct
+          t0 = T{t1.begin(), t1.end()};
+          r0 = R{r1.begin(), r1.end()};
+        } else if (pct < 82) {
+          // initializer list construct
+          auto k2 = gen() >> discardBits;
+          auto v2 = gen();
+          T t({{k, v}, {k2, v}, {k2, v2}});
+          t0 = std::move(t);
+          R r({{k, v}, {k2, v}, {k2, v2}});
+          r0 = std::move(r);
+        } else if (pct < 85) {
+          // copy construct
+          T t(t1);
+          t0 = std::move(t);
+          R r(r1);
+          r0 = std::move(r);
+        } else if (pct < 88) {
+          // copy construct
+          T t(t1, t1.get_allocator());
+          t0 = std::move(t);
+          R r(r1, r1.get_allocator());
+          r0 = std::move(r);
+        } else if (pct < 89) {
+          // move construct
+          t0.~T();
+          new (&t0) T(std::move(t1));
+          r0.~R();
+          new (&r0) R(std::move(r1));
+        } else if (pct < 90) {
+          // move construct
+          t0.~T();
+          auto ta = t1.get_allocator();
+          new (&t0) T(std::move(t1), ta);
+          r0.~R();
+          auto ra = r1.get_allocator();
+          new (&r0) R(std::move(r1), ra);
+        } else if (pct < 94) {
+          // copy assign
+          leakCheckOnly = true;
+          t0 = t1;
+          r0 = r1;
+        } else if (pct < 96) {
+          // move assign
+          t0 = std::move(t1);
+          r0 = std::move(r1);
+        } else if (pct < 98) {
+          // operator==
+          EXPECT_EQ((t0 == t1), (r0 == r1));
+        } else if (pct < 99) {
+          // clear
+          F14TableStats::compute(t0);
+          t0.clear();
+          r0.clear();
+        } else if (pct < 100) {
+          // reserve
+          auto scale = std::uniform_int_distribution<>(0, 8)(gen);
+          auto delta = std::uniform_int_distribution<>(-2, 2)(gen);
+          std::ptrdiff_t target = (t0.size() * scale) / 4 + delta;
+          if (target >= 0) {
+            t0.reserve(static_cast<std::size_t>(target));
+            r0.reserve(static_cast<std::size_t>(target));
+          }
         }
-        k = r->first;
-        auto t = t0.find(k);
-        t = t0.erase(t);
-        if (t != t0.end()) {
-          EXPECT_NE(t->first, k);
+      } catch (std::bad_alloc const&) {
+        ++rollbacks;
+
+        F14TableStats::compute(t0);
+
+        if (leakCheckOnly) {
+          unlimitTestAllocations();
+          t0.clear();
+          for (auto&& kv : r0) {
+            t0[kv.first] = kv.second.val_;
+          }
         }
-        r = r0.erase(r);
-        if (r != r0.end()) {
-          EXPECT_NE(r->first, k);
+
+        if (t0.bucket_count() == t0.size() && t0.size() > 0) {
+          if (t0.size() < 10) {
+            ++resizingSmallRollbacks;
+          } else {
+            ++resizingLargeRollbacks;
+          }
         }
-      }
-    } else if (pct < 50) {
-      // bulk erase
-      if (t0.size() > 0) {
-        auto r = r0.find(k);
-        if (r == r0.end()) {
-          r = r0.begin();
+
+        assert(t0.size() == r0.size());
+        for (auto&& kv : r0) {
+          auto t = t0.find(kv.first);
+          EXPECT_TRUE(
+              t != t0.end() && t->first == kv.first &&
+              t->second.val_ == kv.second.val_);
         }
-        k = r->first;
-        auto t = t0.find(k);
-        auto firstt = t;
-        auto lastt = ++t;
-        t = t0.erase(firstt, lastt);
-        if (t != t0.end()) {
-          EXPECT_NE(t->first, k);
-        }
-        auto firstr = r;
-        auto lastr = ++r;
-        r = r0.erase(firstr, lastr);
-        if (r != r0.end()) {
-          EXPECT_NE(r->first, k);
-        }
-      }
-    } else if (pct < 58) {
-      // find
-      auto t = t0.find(k);
-      auto r = r0.find(k);
-      EXPECT_EQ((t == t0.end()), (r == r0.end()));
-      if (t != t0.end() && r != r0.end()) {
-        EXPECT_EQ(*t, *r);
-      }
-      EXPECT_EQ(t0.count(k), r0.count(k));
-    } else if (pct < 60) {
-      // equal_range
-      auto t = t0.equal_range(k);
-      auto r = r0.equal_range(k);
-      EXPECT_EQ((t.first == t.second), (r.first == r.second));
-      if (t.first != t.second && r.first != r.second) {
-        EXPECT_EQ(*t.first, *r.first);
-        t.first++;
-        r.first++;
-        EXPECT_TRUE(t.first == t.second);
-        EXPECT_TRUE(r.first == r.second);
-      }
-    } else if (pct < 65) {
-      // iterate
-      uint64_t t = 0;
-      for (auto& e : t0) {
-        t += e.first * 37 + e.second + 1000;
-      }
-      uint64_t r = 0;
-      for (auto& e : r0) {
-        r += e.first * 37 + e.second + 1000;
-      }
-      EXPECT_EQ(t, r);
-    } else if (pct < 69) {
-      // swap
-      using std::swap;
-      swap(t0, t1);
-      swap(r0, r1);
-    } else if (pct < 70) {
-      // swap
-      t0.swap(t1);
-      r0.swap(r1);
-    } else if (pct < 72) {
-      // default construct
-      t0.~T();
-      new (&t0) T();
-      r0.~R();
-      new (&r0) R();
-    } else if (pct < 74) {
-      // default construct with capacity
-      std::size_t capacity = k & 0xffff;
-      t0.~T();
-      new (&t0) T(capacity);
-      r0.~R();
-      new (&r0) R(capacity);
-    } else if (pct < 80) {
-      // bulk iterator construct
-      t0.~T();
-      new (&t0) T(r1.begin(), r1.end());
-      r0.~R();
-      new (&r0) R(r1.begin(), r1.end());
-    } else if (pct < 82) {
-      // initializer list construct
-      auto k2 = gen() >> discardBits;
-      auto v2 = gen();
-      t0.~T();
-      new (&t0) T({{k, v}, {k2, v}, {k2, v2}});
-      r0.~R();
-      new (&r0) R({{k, v}, {k2, v}, {k2, v2}});
-    } else if (pct < 88) {
-      // copy construct
-      t0.~T();
-      new (&t0) T(t1);
-      r0.~R();
-      new (&r0) R(r1);
-    } else if (pct < 90) {
-      // move construct
-      t0.~T();
-      new (&t0) T(std::move(t1));
-      r0.~R();
-      new (&r0) R(std::move(r1));
-    } else if (pct < 94) {
-      // copy assign
-      t0 = t1;
-      r0 = r1;
-    } else if (pct < 96) {
-      // move assign
-      t0 = std::move(t1);
-      r0 = std::move(r1);
-    } else if (pct < 98) {
-      // operator==
-      EXPECT_EQ((t0 == t1), (r0 == r1));
-    } else if (pct < 99) {
-      // clear
-      F14TableStats::compute(t0);
-      t0.clear();
-      r0.clear();
-    } else if (pct < 100) {
-      // reserve
-      auto scale = std::uniform_int_distribution<>(0, 8)(gen);
-      auto delta = std::uniform_int_distribution<>(-2, 2)(gen);
-      std::ptrdiff_t target = (t0.size() * scale) / 4 + delta;
-      if (target >= 0) {
-        t0.reserve(static_cast<std::size_t>(target));
-        r0.reserve(static_cast<std::size_t>(target));
       }
     }
   }
+
+  EXPECT_EQ(testAllocatedMemorySize, 0);
 }
 
 template <typename T>
@@ -442,8 +671,6 @@ TEST(F14VectorMap, simple) {
 }
 
 TEST(F14FastMap, simple) {
-  // F14FastMap inherits from a conditional typedef. Verify it compiles.
-  runRandom<F14FastMap<uint64_t, uint64_t>>();
   runSimple<F14FastMap<std::string, std::string>>();
 }
 
@@ -487,6 +714,18 @@ TEST(F14VectorMap, reverse_iterator) {
   }
 }
 
+TEST(F14ValueMap, eraseWhileIterating) {
+  runEraseWhileIterating<F14ValueMap<int, int>>();
+}
+
+TEST(F14NodeMap, eraseWhileIterating) {
+  runEraseWhileIterating<F14NodeMap<int, int>>();
+}
+
+TEST(F14VectorMap, eraseWhileIterating) {
+  runEraseWhileIterating<F14VectorMap<int, int>>();
+}
+
 TEST(F14ValueMap, rehash) {
   runRehash<F14ValueMap<std::string, std::string>>();
 }
@@ -508,15 +747,39 @@ TEST(F14NodeMap, prehash) {
 }
 
 TEST(F14ValueMap, random) {
-  runRandom<F14ValueMap<uint64_t, uint64_t>>();
+  runRandom<F14ValueMap<
+      uint64_t,
+      Tracked<1>,
+      std::hash<uint64_t>,
+      std::equal_to<uint64_t>,
+      SwapTrackingAlloc<std::pair<uint64_t const, Tracked<1>>>>>();
 }
 
 TEST(F14NodeMap, random) {
-  runRandom<F14NodeMap<uint64_t, uint64_t>>();
+  runRandom<F14NodeMap<
+      uint64_t,
+      Tracked<1>,
+      std::hash<uint64_t>,
+      std::equal_to<uint64_t>,
+      SwapTrackingAlloc<std::pair<uint64_t const, Tracked<1>>>>>();
 }
 
 TEST(F14VectorMap, random) {
-  runRandom<F14VectorMap<uint64_t, uint64_t>>();
+  runRandom<F14VectorMap<
+      uint64_t,
+      Tracked<1>,
+      std::hash<uint64_t>,
+      std::equal_to<uint64_t>,
+      SwapTrackingAlloc<std::pair<uint64_t const, Tracked<1>>>>>();
+}
+
+TEST(F14FastMap, random) {
+  runRandom<F14FastMap<
+      uint64_t,
+      Tracked<1>,
+      std::hash<uint64_t>,
+      std::equal_to<uint64_t>,
+      SwapTrackingAlloc<std::pair<uint64_t const, Tracked<1>>>>>();
 }
 
 TEST(F14ValueMap, grow_stats) {
@@ -565,7 +828,7 @@ TEST(F14VectorMap, steady_state_stats) {
   std::mt19937_64 gen(0);
   std::uniform_int_distribution<> dist(0, 10000);
   for (std::size_t i = 0; i < 100000; ++i) {
-    auto key = "0123456789ABCDEFGHIJKLMNOPQ" + std::to_string(dist(gen));
+    auto key = "0123456789ABCDEFGHIJKLMNOPQ" + to<std::string>(dist(gen));
     if (dist(gen) < 1400) {
       h.insert_or_assign(key, i);
     } else {
@@ -635,16 +898,16 @@ TEST(Tracked, baseline) {
     resetTracking();
     b1 = a0;
     EXPECT_EQ(a0.val_, b1.val_);
-    EXPECT_EQ(sumCounts, (Counts{0, 0, 1, 0, 0, 1}));
-    EXPECT_EQ(Tracked<1>::counts, (Counts{0, 0, 1, 0, 0, 1}));
+    EXPECT_EQ(sumCounts, (Counts{0, 0, 1, 0, 0, 1, 0, 1}));
+    EXPECT_EQ(Tracked<1>::counts, (Counts{0, 0, 1, 0, 0, 1, 0, 1}));
   }
   {
     Tracked<1> b1;
     resetTracking();
     b1 = std::move(a0);
     EXPECT_EQ(a0.val_, b1.val_);
-    EXPECT_EQ(sumCounts, (Counts{0, 0, 0, 1, 0, 1}));
-    EXPECT_EQ(Tracked<1>::counts, (Counts{0, 0, 0, 1, 0, 1}));
+    EXPECT_EQ(sumCounts, (Counts{0, 0, 0, 1, 0, 1, 0, 1}));
+    EXPECT_EQ(Tracked<1>::counts, (Counts{0, 0, 0, 1, 0, 1, 0, 1}));
   }
 }
 
@@ -652,7 +915,7 @@ TEST(Tracked, baseline) {
 // and a pair const& or pair&& and cause it to be inserted
 template <typename M, typename F>
 void runInsertCases(
-    std::string const& /* name */,
+    std::string const& name,
     F const& insertFunc,
     uint64_t expectedDist = 0) {
   static_assert(std::is_same<typename M::key_type, Tracked<0>>::value, "");
@@ -667,7 +930,9 @@ void runInsertCases(
     EXPECT_EQ(
         Tracked<0>::counts.dist(Counts{1, 0, 0, 0}) +
             Tracked<1>::counts.dist(Counts{1, 0, 0, 0}),
-        expectedDist);
+        expectedDist)
+        << name << "\n0 -> " << Tracked<0>::counts << "\n1 -> "
+        << Tracked<1>::counts;
   }
   {
     typename M::value_type p{0, 0};
@@ -679,7 +944,9 @@ void runInsertCases(
     EXPECT_EQ(
         Tracked<0>::counts.dist(Counts{1, 0, 0, 0}) +
             Tracked<1>::counts.dist(Counts{0, 1, 0, 0}),
-        expectedDist);
+        expectedDist)
+        << name << "\n0 -> " << Tracked<0>::counts << "\n1 -> "
+        << Tracked<1>::counts;
   }
   {
     std::pair<Tracked<0>, Tracked<1>> p{0, 0};
@@ -691,7 +958,9 @@ void runInsertCases(
     EXPECT_EQ(
         Tracked<0>::counts.dist(Counts{1, 0, 0, 0}) +
             Tracked<1>::counts.dist(Counts{1, 0, 0, 0}),
-        expectedDist);
+        expectedDist)
+        << name << "\n0 -> " << Tracked<0>::counts << "\n1 -> "
+        << Tracked<1>::counts;
   }
   {
     std::pair<Tracked<0>, Tracked<1>> p{0, 0};
@@ -703,7 +972,9 @@ void runInsertCases(
     EXPECT_EQ(
         Tracked<0>::counts.dist(Counts{0, 1, 0, 0}) +
             Tracked<1>::counts.dist(Counts{0, 1, 0, 0}),
-        expectedDist);
+        expectedDist)
+        << name << "\n0 -> " << Tracked<0>::counts << "\n1 -> "
+        << Tracked<1>::counts;
   }
   {
     std::pair<Tracked<2>, Tracked<3>> p{0, 0};
@@ -922,8 +1193,13 @@ void runInsertAndEmplace(std::string const& name) {
   M m;
   typename M::key_type k;
   EXPECT_EQ(m.count(k), 0);
+  EXPECT_FALSE(m.contains(k));
   m.emplace();
   EXPECT_EQ(m.count(k), 1);
+  EXPECT_TRUE(m.contains(k));
+  m.emplace();
+  EXPECT_EQ(m.count(k), 1);
+  EXPECT_TRUE(m.contains(k));
 }
 
 TEST(F14ValueMap, destructuring) {
@@ -958,23 +1234,28 @@ TEST(F14VectorMap, destructuringErase) {
       0);
 }
 
-TEST(F14ValueMap, vectorMaxSize) {
+TEST(F14ValueMap, maxSize) {
   F14ValueMap<int, int> m;
   EXPECT_EQ(
       m.max_size(),
-      std::numeric_limits<uint64_t>::max() / sizeof(std::pair<int, int>));
+      std::numeric_limits<std::size_t>::max() / sizeof(std::pair<int, int>));
 }
 
-TEST(F14NodeMap, vectorMaxSize) {
+TEST(F14NodeMap, maxSize) {
   F14NodeMap<int, int> m;
   EXPECT_EQ(
       m.max_size(),
-      std::numeric_limits<uint64_t>::max() / sizeof(std::pair<int, int>));
+      std::numeric_limits<std::size_t>::max() / sizeof(std::pair<int, int>));
 }
 
 TEST(F14VectorMap, vectorMaxSize) {
   F14VectorMap<int, int> m;
-  EXPECT_EQ(m.max_size(), std::numeric_limits<uint32_t>::max());
+  EXPECT_EQ(
+      m.max_size(),
+      std::min(
+          std::size_t{std::numeric_limits<uint32_t>::max()},
+          std::numeric_limits<std::size_t>::max() /
+              sizeof(std::pair<int, int>)));
 }
 
 template <typename M>
@@ -1015,8 +1296,7 @@ TEST(F14FastMap, moveOnly) {
   runMoveOnlyTest<F14FastMap<f14::MoveOnlyTestInt, f14::MoveOnlyTestInt>>();
 }
 
-TEST(F14ValueMap, heterogeneous) {
-  // note: std::string is implicitly convertible to but not from StringPiece
+TEST(F14ValueMap, heterogeneousLookup) {
   using Hasher = folly::transparent<folly::hasher<folly::StringPiece>>;
   using KeyEqual = folly::transparent<std::equal_to<folly::StringPiece>>;
 
@@ -1025,8 +1305,8 @@ TEST(F14ValueMap, heterogeneous) {
   constexpr auto world = "world"_sp;
 
   F14ValueMap<std::string, bool, Hasher, KeyEqual> map;
-  map.emplace(hello.str(), true);
-  map.emplace(world.str(), false);
+  map.emplace(hello, true);
+  map.emplace(world, false);
 
   auto checks = [hello, buddy](auto& ref) {
     // count
@@ -1037,9 +1317,20 @@ TEST(F14ValueMap, heterogeneous) {
     EXPECT_TRUE(ref.end() == ref.find(buddy));
     EXPECT_EQ(hello, ref.find(hello)->first);
 
+    const auto buddyHashToken = ref.prehash(buddy);
+    const auto helloHashToken = ref.prehash(hello);
+
     // prehash + find
-    EXPECT_TRUE(ref.end() == ref.find(ref.prehash(buddy), buddy));
-    EXPECT_EQ(hello, ref.find(ref.prehash(hello), hello)->first);
+    EXPECT_TRUE(ref.end() == ref.find(buddyHashToken, buddy));
+    EXPECT_EQ(hello, ref.find(helloHashToken, hello)->first);
+
+    // contains
+    EXPECT_FALSE(ref.contains(buddy));
+    EXPECT_TRUE(ref.contains(hello));
+
+    // contains with prehash
+    EXPECT_FALSE(ref.contains(buddyHashToken, buddy));
+    EXPECT_TRUE(ref.contains(helloHashToken, hello));
 
     // equal_range
     EXPECT_TRUE(std::make_pair(ref.end(), ref.end()) == ref.equal_range(buddy));
@@ -1050,6 +1341,499 @@ TEST(F14ValueMap, heterogeneous) {
 
   checks(map);
   checks(folly::as_const(map));
+}
+
+template <typename M>
+void runStatefulFunctorTest() {
+  bool ranHasher = false;
+  bool ranEqual = false;
+  bool ranAlloc = false;
+  bool ranDealloc = false;
+
+  auto hasher = [&](int x) {
+    ranHasher = true;
+    return x;
+  };
+  auto equal = [&](int x, int y) {
+    ranEqual = true;
+    return x == y;
+  };
+  auto alloc = [&](std::size_t n) {
+    ranAlloc = true;
+    return std::malloc(n);
+  };
+  auto dealloc = [&](void* p, std::size_t) {
+    ranDealloc = true;
+    std::free(p);
+  };
+
+  {
+    M map(0, hasher, equal, {alloc, dealloc});
+    map[10]++;
+    map[10]++;
+    EXPECT_EQ(map[10], 2);
+
+    M map2(map);
+    M map3(std::move(map));
+    map = map2;
+    map2.clear();
+    map2 = std::move(map3);
+  }
+  EXPECT_TRUE(ranHasher);
+  EXPECT_TRUE(ranEqual);
+  EXPECT_TRUE(ranAlloc);
+  EXPECT_TRUE(ranDealloc);
+}
+
+TEST(F14ValueMap, statefulFunctors) {
+  runStatefulFunctorTest<F14ValueMap<
+      int,
+      int,
+      GenericHasher<int>,
+      GenericEqual<int>,
+      GenericAlloc<std::pair<int const, int>>>>();
+}
+
+TEST(F14NodeMap, statefulFunctors) {
+  runStatefulFunctorTest<F14NodeMap<
+      int,
+      int,
+      GenericHasher<int>,
+      GenericEqual<int>,
+      GenericAlloc<std::pair<int const, int>>>>();
+}
+
+TEST(F14VectorMap, statefulFunctors) {
+  runStatefulFunctorTest<F14VectorMap<
+      int,
+      int,
+      GenericHasher<int>,
+      GenericEqual<int>,
+      GenericAlloc<std::pair<int const, int>>>>();
+}
+
+TEST(F14FastMap, statefulFunctors) {
+  runStatefulFunctorTest<F14FastMap<
+      int,
+      int,
+      GenericHasher<int>,
+      GenericEqual<int>,
+      GenericAlloc<std::pair<int const, int>>>>();
+}
+
+template <typename M>
+void runHeterogeneousInsertTest() {
+  M map;
+
+  resetTracking();
+  EXPECT_EQ(map.count(10), 0);
+  EXPECT_FALSE(map.contains(10));
+  EXPECT_EQ(Tracked<1>::counts.dist(Counts{0, 0, 0, 0}), 0)
+      << Tracked<1>::counts;
+
+  resetTracking();
+  map[10] = 20;
+  EXPECT_EQ(Tracked<1>::counts.dist(Counts{0, 0, 0, 1}), 0)
+      << Tracked<1>::counts;
+
+  resetTracking();
+  std::pair<int, int> p(10, 30);
+  std::vector<std::pair<int, int>> v({p});
+  map[10] = 30;
+  map.insert(std::pair<int, int>(10, 30));
+  map.insert(std::pair<int const, int>(10, 30));
+  map.insert(p);
+  map.insert(v.begin(), v.end());
+  map.insert(
+      std::make_move_iterator(v.begin()), std::make_move_iterator(v.end()));
+  map.insert_or_assign(10, 40);
+  EXPECT_EQ(Tracked<1>::counts.dist(Counts{0, 0, 0, 0}), 0)
+      << Tracked<1>::counts;
+
+  resetTracking();
+  map.emplace(10, 30);
+  map.emplace(
+      std::piecewise_construct,
+      std::forward_as_tuple(10),
+      std::forward_as_tuple(30));
+  map.emplace(p);
+  map.try_emplace(10, 30);
+  map.try_emplace(10);
+  EXPECT_EQ(Tracked<1>::counts.dist(Counts{0, 0, 0, 0}), 0)
+      << Tracked<1>::counts;
+
+  resetTracking();
+  map.erase(10);
+  EXPECT_EQ(map.size(), 0);
+  EXPECT_EQ(Tracked<1>::counts.dist(Counts{0, 0, 0, 0}), 0)
+      << Tracked<1>::counts;
+}
+
+template <typename M>
+void runHeterogeneousInsertStringTest() {
+  using P = std::pair<StringPiece, std::string>;
+  using CP = std::pair<const StringPiece, std::string>;
+
+  M map;
+  P p{"foo", "hello"};
+  std::vector<P> v{p};
+  StringPiece foo{"foo"};
+
+  map.insert(P("foo", "hello"));
+  // TODO(T31574848): the list-initialization below does not work on libstdc++
+  // versions (e.g., GCC < 6) with no implementation of N4387 ("perfect
+  // initialization" for pairs and tuples).
+  //   StringPiece sp{"foo"};
+  //   map.insert({sp, "hello"});
+  map.insert({"foo", "hello"});
+  map.insert(CP("foo", "hello"));
+  map.insert(p);
+  map.insert(v.begin(), v.end());
+  map.insert(
+      std::make_move_iterator(v.begin()), std::make_move_iterator(v.end()));
+  map.insert_or_assign("foo", "hello");
+  map.insert_or_assign(StringPiece{"foo"}, "hello");
+  EXPECT_EQ(map["foo"], "hello");
+
+  map.emplace(StringPiece{"foo"}, "hello");
+  map.emplace("foo", "hello");
+  map.emplace(p);
+  map.emplace();
+  map.emplace(
+      std::piecewise_construct,
+      std::forward_as_tuple(StringPiece{"foo"}),
+      std::forward_as_tuple(/* count */ 20, 'x'));
+  map.try_emplace(StringPiece{"foo"}, "hello");
+  map.try_emplace(foo, "hello");
+  map.try_emplace(foo);
+  map.try_emplace("foo");
+  map.try_emplace("foo", "hello");
+  map.try_emplace("foo", /* count */ 20, 'x');
+
+  map.erase(StringPiece{"foo"});
+  map.erase(foo);
+  map.erase("");
+  EXPECT_TRUE(map.empty());
+}
+
+TEST(F14ValueMap, heterogeneousInsert) {
+  runHeterogeneousInsertTest<F14ValueMap<
+      Tracked<1>,
+      int,
+      TransparentTrackedHash<1>,
+      TransparentTrackedEqual<1>>>();
+  runHeterogeneousInsertStringTest<F14ValueMap<
+      std::string,
+      std::string,
+      transparent<hasher<StringPiece>>,
+      transparent<DefaultKeyEqual<StringPiece>>>>();
+  runHeterogeneousInsertStringTest<F14ValueMap<std::string, std::string>>();
+}
+
+TEST(F14NodeMap, heterogeneousInsert) {
+  runHeterogeneousInsertTest<F14NodeMap<
+      Tracked<1>,
+      int,
+      TransparentTrackedHash<1>,
+      TransparentTrackedEqual<1>>>();
+  runHeterogeneousInsertStringTest<F14NodeMap<
+      std::string,
+      std::string,
+      transparent<hasher<StringPiece>>,
+      transparent<DefaultKeyEqual<StringPiece>>>>();
+  runHeterogeneousInsertStringTest<F14NodeMap<std::string, std::string>>();
+}
+
+TEST(F14VectorMap, heterogeneousInsert) {
+  runHeterogeneousInsertTest<F14VectorMap<
+      Tracked<1>,
+      int,
+      TransparentTrackedHash<1>,
+      TransparentTrackedEqual<1>>>();
+  runHeterogeneousInsertStringTest<F14VectorMap<
+      std::string,
+      std::string,
+      transparent<hasher<StringPiece>>,
+      transparent<DefaultKeyEqual<StringPiece>>>>();
+  runHeterogeneousInsertStringTest<F14VectorMap<std::string, std::string>>();
+}
+
+TEST(F14FastMap, heterogeneousInsert) {
+  runHeterogeneousInsertTest<F14FastMap<
+      Tracked<1>,
+      int,
+      TransparentTrackedHash<1>,
+      TransparentTrackedEqual<1>>>();
+  runHeterogeneousInsertStringTest<F14FastMap<
+      std::string,
+      std::string,
+      transparent<hasher<StringPiece>>,
+      transparent<DefaultKeyEqual<StringPiece>>>>();
+  runHeterogeneousInsertStringTest<F14FastMap<std::string, std::string>>();
+}
+
+namespace {
+
+// std::is_convertible is not transitive :( Problem scenario: B<T> is
+// implicitly convertible to A, so hasher that takes A can be used as a
+// transparent hasher for a map with key of type B<T>. C is implicitly
+// convertible to any B<T>, but we have to disable heterogeneous find
+// for C.  There is no way to infer the T of the intermediate type so C
+// can't be used to explicitly construct A.
+
+struct A {
+  int value;
+
+  bool operator==(A const& rhs) const {
+    return value == rhs.value;
+  }
+  bool operator!=(A const& rhs) const {
+    return !(*this == rhs);
+  }
+};
+
+struct AHasher {
+  std::size_t operator()(A const& v) const {
+    return v.value;
+  }
+};
+
+template <typename T>
+struct B {
+  int value;
+
+  explicit B(int v) : value(v) {}
+
+  /* implicit */ B(A const& v) : value(v.value) {}
+
+  /* implicit */ operator A() const {
+    return A{value};
+  }
+};
+
+struct C {
+  int value;
+
+  template <typename T>
+  /* implicit */ operator B<T>() const {
+    return B<T>{value};
+  }
+};
+} // namespace
+
+TEST(F14FastMap, disabledDoubleTransparent) {
+  static_assert(std::is_convertible<B<char>, A>::value, "");
+  static_assert(std::is_convertible<C, B<char>>::value, "");
+  static_assert(!std::is_convertible<C, A>::value, "");
+
+  F14FastMap<
+      B<char>,
+      int,
+      folly::transparent<AHasher>,
+      folly::transparent<std::equal_to<A>>>
+      map;
+  map[A{10}] = 10;
+
+  EXPECT_TRUE(map.find(C{10}) != map.end());
+  EXPECT_TRUE(map.find(C{20}) == map.end());
+}
+
+template <typename M>
+void runRandomInsertOrderTest() {
+  if (FOLLY_F14_PERTURB_INSERTION_ORDER) {
+    std::string prev;
+    bool diffFound = false;
+    for (int tries = 0; tries < 100; ++tries) {
+      M m;
+      for (char x = '0'; x <= '7'; ++x) {
+        m.try_emplace(x);
+      }
+      m.reserve(10);
+      auto it = m.try_emplace('8').first;
+      auto addr = &*it;
+      m.try_emplace('9');
+      EXPECT_TRUE(it == m.find('8'));
+      EXPECT_TRUE(addr = &*m.find('8'));
+      std::string s;
+      for (auto&& e : m) {
+        s.push_back(e.first);
+      }
+      LOG(INFO) << s << "\n";
+      if (prev.empty()) {
+        prev = s;
+        continue;
+      }
+      if (prev != s) {
+        diffFound = true;
+        break;
+      }
+    }
+    EXPECT_TRUE(diffFound) << "no randomness found in insert order";
+  }
+}
+
+TEST(F14Map, randomInsertOrder) {
+  runRandomInsertOrderTest<F14ValueMap<char, char>>();
+  runRandomInsertOrderTest<F14FastMap<char, char>>();
+  runRandomInsertOrderTest<F14FastMap<char, std::string>>();
+}
+
+template <typename M>
+void runContinuousCapacityTest(std::size_t minSize, std::size_t maxSize) {
+  using K = typename M::key_type;
+  for (std::size_t n = minSize; n <= maxSize; ++n) {
+    M m1;
+    m1.reserve(n);
+    auto cap = m1.bucket_count();
+    double ratio = cap * 1.0 / n;
+    // worst case scenario is that rehash just occurred and capacityScale
+    // is 5*2^12
+    EXPECT_TRUE(ratio < 1 + 1.0 / (5 << 12))
+        << ratio << ", " << cap << ", " << n;
+    m1[0];
+    M m2;
+    m2 = m1;
+    EXPECT_LE(m2.bucket_count(), 2);
+    for (K i = 1; i < n; ++i) {
+      m1[i];
+    }
+    EXPECT_EQ(m1.bucket_count(), cap);
+    M m3 = m1;
+    EXPECT_EQ(m3.bucket_count(), cap);
+    for (K i = n; i <= cap; ++i) {
+      m1[i];
+    }
+    EXPECT_GT(m1.bucket_count(), cap);
+    EXPECT_LE(m1.bucket_count(), 3 * cap);
+
+    M m4;
+    for (K i = 0; i < n; ++i) {
+      m4[i];
+    }
+    // reserve(0) works like shrink_to_fit.  Note that tight fit (1/8
+    // waste bound) only applies for vector policy or single-chunk, which
+    // might not apply to m1.  m3 should already have been optimally sized.
+    m1.reserve(0);
+    m3.reserve(0);
+    m4.reserve(0);
+    EXPECT_GT(m1.load_factor(), 0.5);
+    EXPECT_GE(m3.load_factor(), 0.875);
+    EXPECT_EQ(m3.bucket_count(), cap);
+    EXPECT_GE(m4.load_factor(), 0.875);
+  }
+}
+
+TEST(F14Map, continuousCapacitySmall) {
+  runContinuousCapacityTest<folly::F14NodeMap<std::size_t, std::string>>(1, 14);
+  runContinuousCapacityTest<folly::F14ValueMap<std::size_t, std::string>>(
+      1, 14);
+  runContinuousCapacityTest<folly::F14VectorMap<std::size_t, std::string>>(
+      1, 100);
+  runContinuousCapacityTest<folly::F14FastMap<std::size_t, std::string>>(
+      1, 100);
+}
+
+TEST(F14Map, continuousCapacityBig0) {
+  runContinuousCapacityTest<folly::F14VectorMap<std::size_t, std::string>>(
+      1000000 - 1, 1000000 - 1);
+}
+
+TEST(F14Map, continuousCapacityBig1) {
+  runContinuousCapacityTest<folly::F14VectorMap<std::size_t, std::string>>(
+      1000000, 1000000);
+}
+
+TEST(F14Map, continuousCapacityBig2) {
+  runContinuousCapacityTest<folly::F14VectorMap<std::size_t, std::string>>(
+      1000000 + 1, 1000000 + 1);
+}
+
+TEST(F14Map, continuousCapacityBig3) {
+  runContinuousCapacityTest<folly::F14VectorMap<std::size_t, std::string>>(
+      1000000 + 2, 1000000 + 2);
+}
+
+TEST(F14Map, continuousCapacityF12) {
+  runContinuousCapacityTest<folly::F14VectorMap<uint16_t, uint16_t>>(
+      0xfff0, 0xfffe);
+}
+
+template <template <class...> class TMap>
+void testContainsWithPrecomputedHash() {
+  TMap<int, int> m{};
+  const auto key{1};
+  m.insert({key, 1});
+  const auto hashToken = m.prehash(key);
+  EXPECT_TRUE(m.contains(hashToken, key));
+  const auto otherKey{2};
+  const auto hashTokenNotFound = m.prehash(otherKey);
+  EXPECT_FALSE(m.contains(hashTokenNotFound, otherKey));
+}
+
+TEST(F14Map, containsWithPrecomputedHash) {
+  testContainsWithPrecomputedHash<F14ValueMap>();
+  testContainsWithPrecomputedHash<F14VectorMap>();
+  testContainsWithPrecomputedHash<F14NodeMap>();
+  testContainsWithPrecomputedHash<F14FastMap>();
+}
+
+template <template <class...> class TMap>
+void testEraseIf() {
+  TMap<int, int> m{{1, 1}, {2, 2}, {3, 3}, {4, 4}};
+  const auto isEvenKey = [](const auto& p) { return p.first % 2 == 0; };
+  erase_if(m, isEvenKey);
+  ASSERT_EQ(2u, m.size());
+  EXPECT_TRUE(m.contains(1));
+  EXPECT_TRUE(m.contains(3));
+}
+
+TEST(F14Map, eraseIf) {
+  testEraseIf<F14ValueMap>();
+  testEraseIf<F14VectorMap>();
+  testEraseIf<F14NodeMap>();
+  testEraseIf<F14FastMap>();
+}
+
+namespace {
+template <std::size_t N>
+struct DivideBy {
+  // this is a lie for testing purposes
+  using folly_is_avalanching = std::true_type;
+
+  std::size_t operator()(std::size_t v) const {
+    return v / N;
+  }
+};
+} // namespace
+
+template <template <class...> class TMap>
+void testCopyAfterRemovedCollisions() {
+  // Insert 11 things into chunks 0, 1, and 2, 15 into chunk 3, then
+  // remove all but the last one from chunk 1 and see if we can find that
+  // one in a copy of the map.
+  TMap<std::size_t, bool, DivideBy<16>> map;
+  map.reserve(48);
+  for (std::size_t k = 0; k < 11; ++k) {
+    map[k] = true;
+    map[k + 16] = true;
+    map[k + 32] = true;
+  }
+  for (std::size_t k = 0; k < 14; ++k) {
+    map[k + 48] = true;
+  }
+  map[14 + 48] = true;
+  for (std::size_t k = 0; k < 14; ++k) {
+    map.erase(k + 48);
+  }
+  auto copy = map;
+  EXPECT_EQ(copy.count(14 + 48), 1);
+}
+
+TEST(F14Map, copyAfterRemovedCollisions) {
+  testCopyAfterRemovedCollisions<F14ValueMap>();
+  testCopyAfterRemovedCollisions<F14VectorMap>();
+  testCopyAfterRemovedCollisions<F14NodeMap>();
+  testCopyAfterRemovedCollisions<F14FastMap>();
 }
 
 ///////////////////////////////////

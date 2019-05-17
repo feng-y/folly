@@ -28,18 +28,24 @@
 
 #include <folly/Random.h>
 #include <folly/portability/Asm.h>
+#include <folly/portability/GFlags.h>
 #include <folly/portability/GTest.h>
 #include <folly/portability/PThread.h>
 #include <folly/portability/Unistd.h>
 
-using folly::MSLGuard;
 using folly::MicroLock;
 using folly::MicroSpinLock;
+using folly::MSLGuard;
 using std::string;
 
 #ifdef FOLLY_PICO_SPIN_LOCK_H_
 using folly::PicoSpinLock;
 #endif
+
+DEFINE_int64(
+    stress_test_seconds,
+    2,
+    "Number of seconds for which to run stress tests");
 
 namespace {
 
@@ -56,18 +62,23 @@ struct LockedVal {
 // Compile time test for packed struct support (requires that both of
 // these classes are POD).
 FOLLY_PACK_PUSH
-struct ignore1 { MicroSpinLock msl; int16_t foo; } FOLLY_PACK_ATTR;
+struct ignore1 {
+  MicroSpinLock msl;
+  int16_t foo;
+} FOLLY_PACK_ATTR;
 static_assert(sizeof(ignore1) == 3, "Size check failed");
 static_assert(sizeof(MicroSpinLock) == 1, "Size check failed");
 #ifdef FOLLY_PICO_SPIN_LOCK_H_
-struct ignore2 { PicoSpinLock<uint32_t> psl; int16_t foo; } FOLLY_PACK_ATTR;
+struct ignore2 {
+  PicoSpinLock<uint32_t> psl;
+  int16_t foo;
+} FOLLY_PACK_ATTR;
 static_assert(sizeof(ignore2) == 6, "Size check failed");
 #endif
 FOLLY_PACK_POP
 
 LockedVal v;
 void splock_test() {
-
   const int max = 1000;
   auto rng = folly::ThreadLocalPRNG();
   for (int i = 0; i < max; i++) {
@@ -85,10 +96,13 @@ void splock_test() {
 }
 
 #ifdef FOLLY_PICO_SPIN_LOCK_H_
-template <class T> struct PslTest {
+template <class T>
+struct PslTest {
   PicoSpinLock<T> lock;
 
-  PslTest() { lock.init(); }
+  PslTest() {
+    lock.init();
+  }
 
   void doTest() {
     using UT = typename std::make_unsigned<T>::type;
@@ -161,7 +175,7 @@ TEST(SmallLocks, PicoSpinCorrectness) {
 }
 
 TEST(SmallLocks, PicoSpinSigned) {
-  typedef PicoSpinLock<int16_t,0> Lock;
+  typedef PicoSpinLock<int16_t, 0> Lock;
   Lock val;
   val.init(-4);
   EXPECT_EQ(val.getData(), -4);
@@ -192,7 +206,6 @@ FOLLY_PACK_POP
 namespace {
 
 struct SimpleBarrier {
-
   SimpleBarrier() : lock_(), cv_(), ready_(false) {}
 
   void wait() {
@@ -298,4 +311,95 @@ TEST(SmallLocks, MicroLockTryLock) {
   EXPECT_TRUE(lock.try_lock());
   EXPECT_FALSE(lock.try_lock());
   lock.unlock();
+}
+
+namespace {
+template <typename Mutex, typename Duration>
+void simpleStressTest(Duration duration, int numThreads) {
+  auto&& mutex = Mutex{};
+  auto&& data = std::atomic<std::uint64_t>{0};
+  auto&& threads = std::vector<std::thread>{};
+  auto&& stop = std::atomic<bool>{true};
+
+  for (auto i = 0; i < numThreads; ++i) {
+    threads.emplace_back([&mutex, &data, &stop] {
+      while (!stop.load(std::memory_order_relaxed)) {
+        auto lck = std::unique_lock<Mutex>{mutex};
+        EXPECT_EQ(data.fetch_add(1, std::memory_order_relaxed), 0);
+        EXPECT_EQ(data.fetch_sub(1, std::memory_order_relaxed), 1);
+      }
+    });
+  }
+
+  std::this_thread::sleep_for(duration);
+  stop.store(true);
+  for (auto& thread : threads) {
+    thread.join();
+  }
+}
+} // namespace
+
+TEST(SmallLocks, MicroSpinLockStressTestLockTwoThreads) {
+  auto duration = std::chrono::seconds{FLAGS_stress_test_seconds};
+  simpleStressTest<MicroSpinLock>(duration, 2);
+}
+
+TEST(SmallLocks, MicroSpinLockStressTestLockHardwareConcurrency) {
+  auto duration = std::chrono::seconds{FLAGS_stress_test_seconds};
+  auto threads = std::thread::hardware_concurrency();
+  simpleStressTest<MicroSpinLock>(duration, threads);
+}
+
+TEST(SmallLocks, PicoSpinLockStressTestLockTwoThreads) {
+  auto duration = std::chrono::seconds{FLAGS_stress_test_seconds};
+  simpleStressTest<PicoSpinLock<std::uint16_t>>(duration, 2);
+}
+
+TEST(SmallLocks, PicoSpinLockStressTestLockHardwareConcurrency) {
+  auto duration = std::chrono::seconds{FLAGS_stress_test_seconds};
+  auto threads = std::thread::hardware_concurrency();
+  simpleStressTest<PicoSpinLock<std::uint16_t>>(duration, threads);
+}
+
+namespace {
+template <typename Mutex>
+class MutexWrapper {
+ public:
+  void lock() {
+    while (!mutex_.try_lock()) {
+    }
+  }
+  void unlock() {
+    mutex_.unlock();
+  }
+
+  Mutex mutex_;
+};
+
+template <typename Mutex, typename Duration>
+void simpleStressTestTryLock(Duration duration, int numThreads) {
+  simpleStressTest<MutexWrapper<Mutex>>(duration, numThreads);
+}
+} // namespace
+
+TEST(SmallLocks, MicroSpinLockStressTestTryLockTwoThreads) {
+  auto duration = std::chrono::seconds{FLAGS_stress_test_seconds};
+  simpleStressTestTryLock<MicroSpinLock>(duration, 2);
+}
+
+TEST(SmallLocks, MicroSpinLockStressTestTryLockHardwareConcurrency) {
+  auto duration = std::chrono::seconds{FLAGS_stress_test_seconds};
+  auto threads = std::thread::hardware_concurrency();
+  simpleStressTestTryLock<MicroSpinLock>(duration, threads);
+}
+
+TEST(SmallLocks, PicoSpinLockStressTestTryLockTwoThreads) {
+  auto duration = std::chrono::seconds{FLAGS_stress_test_seconds};
+  simpleStressTestTryLock<PicoSpinLock<std::uint16_t>>(duration, 2);
+}
+
+TEST(SmallLocks, PicoSpinLockStressTestTryLockHardwareConcurrency) {
+  auto duration = std::chrono::seconds{FLAGS_stress_test_seconds};
+  auto threads = std::thread::hardware_concurrency();
+  simpleStressTestTryLock<PicoSpinLock<std::uint16_t>>(duration, threads);
 }

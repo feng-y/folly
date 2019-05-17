@@ -16,7 +16,8 @@
 
 #pragma once
 
-#if defined(__ELF__) && (defined(__x86_64__) || defined(__i386__))
+#if defined(__ELF__) && (defined(__x86_64__) || defined(__i386__)) && \
+    !FOLLY_DISABLE_SDT
 
 #include <folly/tracing/StaticTracepoint-ELFx86.h>
 
@@ -40,5 +41,6 @@
   do {                                                \
   } while (0)
 #define FOLLY_SDT_IS_ENABLED(provider, name) (false)
-
+#define FOLLY_SDT_DEFINE_SEMAPHORE(provider, name)
+#define FOLLY_SDT_DECLARE_SEMAPHORE(provider, name)
 #endif

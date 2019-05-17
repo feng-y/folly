@@ -21,15 +21,14 @@
 #include <thread>
 
 #include <folly/Memory.h>
-#include <folly/experimental/RCURefCount.h>
 #include <folly/experimental/ReadMostlySharedPtr.h>
 #include <folly/portability/GTest.h>
 #include <folly/synchronization/Baton.h>
 
 using folly::ReadMostlyMainPtr;
-using folly::ReadMostlyWeakPtr;
-using folly::ReadMostlySharedPtr;
 using folly::ReadMostlyMainPtrDeleter;
+using folly::ReadMostlySharedPtr;
+using folly::ReadMostlyWeakPtr;
 
 // send SIGALRM to test process after this many seconds
 const unsigned int TEST_TIMEOUT = 10;
@@ -66,7 +65,6 @@ class Coordinator {
   }
 
   void waitForRequest() {
-    folly::RCURegisterThread();
     requestBaton_.wait();
   }
 

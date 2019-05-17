@@ -16,7 +16,7 @@
 
 #include <folly/io/async/SSLOptions.h>
 #include <folly/Format.h>
-#include <folly/Logging.h>
+#include <glog/logging.h>
 
 namespace folly {
 namespace ssl {
@@ -26,10 +26,6 @@ void logDfatal(std::exception const& e) {
   LOG(DFATAL) << exceptionStr(e);
 }
 } // namespace ssl_options_detail
-
-constexpr std::array<const char*, 12> SSLCommonOptions::kCipherList;
-constexpr std::array<const char*, 8> SSLCommonOptions::kSignatureAlgorithms;
-constexpr std::array<const char*, 12> SSLServerOptions::kCipherList;
 
 void SSLCommonOptions::setClientOptions(SSLContext& ctx) {
 #ifdef SSL_MODE_HANDSHAKE_CUTTHROUGH

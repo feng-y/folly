@@ -21,7 +21,6 @@
 
 #include <folly/Hash.h>
 #include <folly/Indestructible.h>
-#include <folly/Optional.h>
 #include <folly/Portability.h>
 #include <folly/Unit.h>
 #include <folly/lang/SafeAssert.h>
@@ -59,7 +58,7 @@ struct WaitNodeBase {
   }
 
   void wake() {
-    std::unique_lock<std::mutex> nodeLock(mutex_);
+    std::lock_guard<std::mutex> nodeLock(mutex_);
     signaled_ = true;
     cond_.notify_one();
   }
@@ -168,7 +167,7 @@ class ParkingLot {
 
     template <typename D>
     WaitNode(uint64_t key, uint64_t lotid, D&& data)
-        : WaitNodeBase(key, lotid), data_(std::forward<Data>(data)) {}
+        : WaitNodeBase(key, lotid), data_(std::forward<D>(data)) {}
   };
 
  public:

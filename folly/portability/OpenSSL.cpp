@@ -22,7 +22,7 @@ namespace folly {
 namespace portability {
 namespace ssl {
 
-#if OPENSSL_IS_BORINGSSL
+#ifdef OPENSSL_IS_BORINGSSL
 int SSL_CTX_set1_sigalgs_list(SSL_CTX*, const char*) {
   return 1; // 0 implies error
 }
@@ -62,6 +62,13 @@ int SSL_SESSION_up_ref(SSL_SESSION* session) {
 
 int X509_up_ref(X509* x) {
   return CRYPTO_add(&x->references, 1, CRYPTO_LOCK_X509);
+}
+
+void X509_STORE_CTX_set0_verified_chain(
+    X509_STORE_CTX* ctx,
+    STACK_OF(X509) * sk) {
+  sk_X509_pop_free(ctx->chain, X509_free);
+  ctx->chain = sk;
 }
 
 int X509_STORE_up_ref(X509_STORE* v) {
@@ -269,6 +276,19 @@ void DH_get0_key(
   }
   if (priv_key != nullptr) {
     *priv_key = dh->priv_key;
+  }
+}
+
+long DH_get_length(const DH* dh) {
+  return dh->length;
+}
+
+int DH_set_length(DH* dh, long length) {
+  if (dh != nullptr) {
+    dh->length = length;
+    return 1;
+  } else {
+    return 0;
   }
 }
 
@@ -490,6 +510,19 @@ X509* X509_OBJECT_get0_X509(const X509_OBJECT* obj) {
   }
   return obj->data.x509;
 }
+
+const ASN1_TIME* X509_CRL_get0_lastUpdate(const X509_CRL* crl) {
+  return X509_CRL_get_lastUpdate(crl);
+}
+
+const ASN1_TIME* X509_CRL_get0_nextUpdate(const X509_CRL* crl) {
+  return X509_CRL_get_nextUpdate(crl);
+}
+
+const X509_ALGOR* X509_get0_tbs_sigalg(const X509* x) {
+  return x->cert_info->signature;
+}
+
 #endif // !FOLLY_OPENSSL_IS_110
 } // namespace ssl
 } // namespace portability

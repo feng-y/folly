@@ -18,6 +18,8 @@
 #include <chrono>
 #include <functional>
 
+#include <folly/io/async/HHWheelTimer-fwd.h>
+
 namespace folly {
 namespace fibers {
 
@@ -49,14 +51,13 @@ class LoopController {
 
   /**
    * Same as schedule(), but safe to call from any thread.
-   * Runs func and only schedules if func returned true.
    */
-  virtual void scheduleThreadSafe(std::function<bool()> func) = 0;
+  virtual void scheduleThreadSafe() = 0;
 
   /**
-   * Called by FiberManager to schedule some function to be run at some time.
+   * Used by FiberManager to schedule some function to be run at some time.
    */
-  virtual void timedSchedule(std::function<void()> func, TimePoint time) = 0;
+  virtual HHWheelTimer& timer() = 0;
 };
 } // namespace fibers
 } // namespace folly

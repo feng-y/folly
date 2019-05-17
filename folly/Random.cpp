@@ -63,21 +63,28 @@ void readRandomDevice(void* data, size_t size) {
   PCHECK(CryptGenRandom(cryptoProv, (DWORD)size, (BYTE*)data));
 #else
   // Keep the random device open for the duration of the program.
-  static int randomFd = ::open("/dev/urandom", O_RDONLY);
+  static int randomFd = ::open("/dev/urandom", O_RDONLY | O_CLOEXEC);
   PCHECK(randomFd >= 0);
   auto bytesRead = readFull(randomFd, data, size);
-  PCHECK(bytesRead >= 0 && size_t(bytesRead) == size);
+  PCHECK(bytesRead >= 0);
+  CHECK_EQ(size_t(bytesRead), size);
 #endif
 }
 
 class BufferedRandomDevice {
  public:
+  static once_flag flag;
   static constexpr size_t kDefaultBufferSize = 128;
+
+  static void notifyNewGlobalEpoch() {
+    globalEpoch_.fetch_add(1, std::memory_order_relaxed);
+  }
 
   explicit BufferedRandomDevice(size_t bufferSize = kDefaultBufferSize);
 
   void get(void* data, size_t size) {
-    if (LIKELY(size <= remaining())) {
+    auto const globalEpoch = globalEpoch_.load(std::memory_order_relaxed);
+    if (LIKELY(globalEpoch == epoch_ && size <= remaining())) {
       memcpy(data, ptr_, size);
       ptr_ += size;
     } else {
@@ -92,18 +99,42 @@ class BufferedRandomDevice {
     return size_t(buffer_.get() + bufferSize_ - ptr_);
   }
 
+  static std::atomic<size_t> globalEpoch_;
+
+  size_t epoch_{size_t(-1)}; // refill on first use
   const size_t bufferSize_;
   std::unique_ptr<unsigned char[]> buffer_;
   unsigned char* ptr_;
 };
 
+once_flag BufferedRandomDevice::flag;
+std::atomic<size_t> BufferedRandomDevice::globalEpoch_{0};
+struct RandomTag {};
+
 BufferedRandomDevice::BufferedRandomDevice(size_t bufferSize)
-  : bufferSize_(bufferSize),
-    buffer_(new unsigned char[bufferSize]),
-    ptr_(buffer_.get() + bufferSize) {  // refill on first use
+    : bufferSize_(bufferSize),
+      buffer_(new unsigned char[bufferSize]),
+      ptr_(buffer_.get() + bufferSize) { // refill on first use
+  call_once(flag, [this]() {
+    detail::AtFork::registerHandler(
+        this,
+        /*prepare*/ []() { return true; },
+        /*parent*/ []() {},
+        /*child*/
+        []() {
+          // Ensure child and parent do not share same entropy pool.
+          BufferedRandomDevice::notifyNewGlobalEpoch();
+        });
+  });
 }
 
 void BufferedRandomDevice::getSlow(unsigned char* data, size_t size) {
+  auto const globalEpoch = globalEpoch_.load(std::memory_order_relaxed);
+  if (globalEpoch != epoch_) {
+    epoch_ = globalEpoch_;
+    ptr_ = buffer_.get() + bufferSize_;
+  }
+
   DCHECK_GT(size, remaining());
   if (size >= bufferSize_) {
     // Just read directly.
@@ -123,8 +154,6 @@ void BufferedRandomDevice::getSlow(unsigned char* data, size_t size) {
   memcpy(data, ptr_, size);
   ptr_ += size;
 }
-
-struct RandomTag {};
 
 } // namespace
 

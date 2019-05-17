@@ -6,7 +6,7 @@ Folly: Facebook Open-source Library
 ### What is `folly`?
 
 Folly (acronymed loosely after Facebook Open Source Library) is a
-library of C++11 components designed with practicality and efficiency
+library of C++14 components designed with practicality and efficiency
 in mind. **Folly contains a variety of core library components used extensively
 at Facebook**. In particular, it's often a dependency of Facebook's other
 open source C++ efforts and place where those projects can share code.
@@ -66,13 +66,13 @@ is to look at the headers in [top level `folly/` directory](https://github.com/f
 check the [`docs` folder](folly/docs) for documentation, starting with the
 [overview](folly/docs/Overview.md).
 
-Folly is published on Github at https://github.com/facebook/folly
+Folly is published on GitHub at https://github.com/facebook/folly
 
 ### Build Notes
 
 #### Dependencies
 
-folly requires gcc 4.9+ and a version of boost compiled with C++14 support.
+folly requires gcc 5.1+ and a version of boost compiled with C++14 support.
 
 googletest is required to build and run folly's tests.  You can download
 it from https://github.com/google/googletest/archive/release-1.8.0.tar.gz
@@ -83,7 +83,7 @@ wget https://github.com/google/googletest/archive/release-1.8.0.tar.gz && \
 tar zxf release-1.8.0.tar.gz && \
 rm -f release-1.8.0.tar.gz && \
 cd googletest-release-1.8.0 && \
-cmake configure . && \
+cmake . && \
 make && \
 make install
 ```
@@ -96,12 +96,12 @@ variables to make CMAKE look also look for header files and libraries in
 non-standard locations.  For example, to also search the directories
 `/alt/include/path1` and `/alt/include/path2` for header files and the
 directories `/alt/lib/path1` and `/alt/lib/path2` for libraries, you can invoke
-`cmake configure` as follows:
+`cmake` as follows:
 
 ```
-cmake configure \
+cmake \
   -DCMAKE_INCLUDE_PATH=/alt/include/path1:/alt/include/path2 \
-  -DCMAKE_LIBRARY_PATH=/alt/lib/path1:/alt/lib/path2
+  -DCMAKE_LIBRARY_PATH=/alt/lib/path1:/alt/lib/path2 ...
 ```
 
 #### Ubuntu 16.04 LTS
@@ -130,7 +130,7 @@ sudo apt-get install \
     pkg-config
 ```
 
-If advanced debugging functionality is required
+If advanced debugging functionality is required, use:
 
 ```
 sudo apt-get install \
@@ -139,12 +139,12 @@ sudo apt-get install \
     libdwarf-dev
 ```
 
-In the folly directory, run:
+In the folly directory (e.g. the checkout root or the archive unpack root), run:
 ```
   mkdir _build && cd _build
-  cmake configure ..
+  cmake ..
   make -j $(nproc)
-  make install
+  make install # with either sudo or DESTDIR as necessary
 ```
 
 #### OS X (Homebrew)
@@ -154,9 +154,10 @@ folly is available as a Formula and releases may be built via `brew install foll
 You may also use `folly/build/bootstrap-osx-homebrew.sh` to build against `master`:
 
 ```
-  cd folly
-  ./build/bootstrap-osx-homebrew.sh
+  ./folly/build/bootstrap-osx-homebrew.sh
 ```
+
+This will create a build directory `_build` in the top-level.
 
 #### OS X (MacPorts)
 
@@ -164,9 +165,8 @@ Install the required packages from MacPorts:
 
 ```
   sudo port install \
-    autoconf \
-    automake \
     boost \
+    cmake \
     gflags \
     git \
     google-glog \
@@ -174,8 +174,9 @@ Install the required packages from MacPorts:
     libtool \
     lz4 \
     lzma \
-    scons \
+    openssl \
     snappy \
+    xz \
     zlib
 ```
 
@@ -193,9 +194,10 @@ Download and install folly with the parameters listed below:
 
 ```
   git clone https://github.com/facebook/folly.git
-  cd folly/folly
-  autoreconf -ivf
-  ./configure CPPFLAGS="-I/opt/local/include" LDFLAGS="-L/opt/local/lib"
+  cd folly
+  mkdir _build
+  cd _build
+  cmake ..
   make
   sudo make install
 ```
@@ -216,13 +218,13 @@ You may also use `vcpkg install folly:x64-windows --head` to build against `mast
   [double-conversion/] `ln -s src double-conversion`
 
   [folly/] `mkdir build && cd build`
-  [folly/build/] `cmake configure "-DCMAKE_INCLUDE_PATH=$DOUBLE_CONVERSION_HOME/include" "-DCMAKE_LIBRARY_PATH=$DOUBLE_CONVERSION_HOME/lib" ..`
+  [folly/build/] `cmake "-DCMAKE_INCLUDE_PATH=$DOUBLE_CONVERSION_HOME/include" "-DCMAKE_LIBRARY_PATH=$DOUBLE_CONVERSION_HOME/lib" ..`
 
   [folly/build/] `make`
 
 - additional platform specific dependencies:
 
-  Fedora 21 64-bit
+  Fedora >= 21 64-bit (last tested on Fedora 28 64-bit)
     - gcc
     - gcc-c++
     - cmake

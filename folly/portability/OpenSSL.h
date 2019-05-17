@@ -61,13 +61,13 @@
 #define FOLLY_OPENSSL_IS_110 (OPENSSL_VERSION_NUMBER >= 0x10100000L)
 #endif
 
-#if !OPENSSL_IS_BORINGSSL && !FOLLY_OPENSSL_IS_100 && !FOLLY_OPENSSL_IS_101 && \
-    !FOLLY_OPENSSL_IS_102 && !FOLLY_OPENSSL_IS_110
+#if !defined(OPENSSL_IS_BORINGSSL) && !FOLLY_OPENSSL_IS_100 && \
+    !FOLLY_OPENSSL_IS_101 && !FOLLY_OPENSSL_IS_102 && !FOLLY_OPENSSL_IS_110
 #warning Compiling with unsupported OpenSSL version
 #endif
 
 // BoringSSL and OpenSSL 0.9.8f later with TLS extension support SNI.
-#if OPENSSL_IS_BORINGSSL || \
+#if defined(OPENSSL_IS_BORINGSSL) || \
     (OPENSSL_VERSION_NUMBER >= 0x00908070L && !defined(OPENSSL_NO_TLSEXT))
 #define FOLLY_OPENSSL_HAS_SNI 1
 #else
@@ -75,11 +75,18 @@
 #endif
 
 // BoringSSL and OpenSSL 1.0.2 later with TLS extension support ALPN.
-#if OPENSSL_IS_BORINGSSL || \
+#if defined(OPENSSL_IS_BORINGSSL) || \
     (OPENSSL_VERSION_NUMBER >= 0x1000200fL && !defined(OPENSSL_NO_TLSEXT))
 #define FOLLY_OPENSSL_HAS_ALPN 1
 #else
 #define FOLLY_OPENSSL_HAS_ALPN 0
+#endif
+
+// OpenSSL 1.1.1 and above have TLS 1.3 support
+#if OPENSSL_VERSION_NUMBER >= 0x1010100fL
+#define FOLLY_OPENSSL_HAS_TLS13 1
+#else
+#define FOLLY_OPENSSL_HAS_TLS13 0
 #endif
 
 // This attempts to "unify" the OpenSSL libcrypto/libssl APIs between
@@ -92,7 +99,7 @@ namespace folly {
 namespace portability {
 namespace ssl {
 
-#if OPENSSL_IS_BORINGSSL
+#ifdef OPENSSL_IS_BORINGSSL
 int SSL_CTX_set1_sigalgs_list(SSL_CTX* ctx, const char* sigalgs_list);
 int TLS1_get_client_version(SSL* s);
 #endif
@@ -111,6 +118,9 @@ int SSL_CTX_up_ref(SSL_CTX* session);
 int SSL_SESSION_up_ref(SSL_SESSION* session);
 int X509_up_ref(X509* x);
 int X509_STORE_up_ref(X509_STORE* v);
+void X509_STORE_CTX_set0_verified_chain(
+    X509_STORE_CTX* ctx,
+    STACK_OF(X509) * sk);
 int EVP_PKEY_up_ref(EVP_PKEY* evp);
 void RSA_get0_key(
     const RSA* r,
@@ -160,6 +170,8 @@ void DH_get0_pqg(
     const BIGNUM** q,
     const BIGNUM** g);
 void DH_get0_key(const DH* dh, const BIGNUM** pub_key, const BIGNUM** priv_key);
+long DH_get_length(const DH* dh);
+int DH_set_length(DH* dh, long length);
 
 void DSA_get0_pqg(
     const DSA* dsa,
@@ -199,6 +211,12 @@ uint32_t X509_get_extended_key_usage(X509* x);
 
 int X509_OBJECT_get_type(const X509_OBJECT* obj);
 X509* X509_OBJECT_get0_X509(const X509_OBJECT* obj);
+
+const ASN1_TIME* X509_CRL_get0_lastUpdate(const X509_CRL* crl);
+const ASN1_TIME* X509_CRL_get0_nextUpdate(const X509_CRL* crl);
+
+const X509_ALGOR* X509_get0_tbs_sigalg(const X509* x);
+
 #endif
 
 #if FOLLY_OPENSSL_IS_110
@@ -215,8 +233,6 @@ X509* X509_OBJECT_get0_X509(const X509_OBJECT* obj);
 } // namespace folly
 
 FOLLY_PUSH_WARNING
-#if __CLANG_PREREQ(3, 0)
-FOLLY_GCC_DISABLE_WARNING("-Wheader-hygiene")
-#endif
+FOLLY_CLANG_DISABLE_WARNING("-Wheader-hygiene")
 /* using override */ using namespace folly::portability::ssl;
 FOLLY_POP_WARNING

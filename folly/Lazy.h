@@ -20,6 +20,7 @@
 #include <utility>
 
 #include <folly/Optional.h>
+#include <folly/functional/Invoke.h>
 
 namespace folly {
 
@@ -88,7 +89,7 @@ namespace detail {
 
 template <class Func>
 struct Lazy {
-  typedef typename std::result_of<Func()>::type result_type;
+  typedef invoke_result_t<Func> result_type;
 
   static_assert(
       !std::is_const<Func>::value,
@@ -100,10 +101,7 @@ struct Lazy {
   explicit Lazy(Func&& f) : func_(std::move(f)) {}
   explicit Lazy(const Func& f) : func_(f) {}
 
-  Lazy(Lazy&& o)
-    : value_(std::move(o.value_))
-    , func_(std::move(o.func_))
-  {}
+  Lazy(Lazy&& o) : value_(std::move(o.value_)), func_(std::move(o.func_)) {}
 
   Lazy(const Lazy&) = delete;
   Lazy& operator=(const Lazy&) = delete;

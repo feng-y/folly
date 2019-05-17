@@ -25,6 +25,8 @@
 #include <folly/io/async/AsyncSocketException.h>
 #include <folly/io/async/EventBase.h>
 #include <folly/io/async/EventHandler.h>
+#include <folly/net/NetOps.h>
+#include <folly/net/NetworkSocket.h>
 
 namespace folly {
 
@@ -108,7 +110,7 @@ class AsyncUDPSocket : public EventHandler {
    * Returns the address server is listening on
    */
   virtual const folly::SocketAddress& address() const {
-    CHECK_NE(-1, fd_) << "Server not yet bound to an address";
+    CHECK_NE(NetworkSocket(), fd_) << "Server not yet bound to an address";
     return localAddress_;
   }
 
@@ -126,7 +128,7 @@ class AsyncUDPSocket : public EventHandler {
    * FDOwnership::SHARED. In case FD is shared, it will not be `close`d in
    * destructor.
    */
-  virtual void setFD(int fd, FDOwnership ownership);
+  virtual void setFD(NetworkSocket fd, FDOwnership ownership);
 
   /**
    * Send the data in buffer to destination. Returns the return code from
@@ -137,8 +139,39 @@ class AsyncUDPSocket : public EventHandler {
       const std::unique_ptr<folly::IOBuf>& buf);
 
   /**
+   * Send the data in buffers to destination. Returns the return code from
+   * ::sendmmsg.
+   * bufs is an array of std::unique_ptr<folly::IOBuf>
+   * of size num
+   */
+  virtual int writem(
+      const folly::SocketAddress& address,
+      const std::unique_ptr<folly::IOBuf>* bufs,
+      size_t num);
+
+  /**
+   * Send the data in buffer to destination. Returns the return code from
+   * ::sendmsg.
+   *  gso is the generic segmentation offload value
+   *  writeGSO will return -1 if
+   *  buf->computeChainDataLength() <= gso
+   *  Before calling writeGSO with a positive value
+   *  verify GSO is supported on this platform by calling getGSO
+   */
+  virtual ssize_t writeGSO(
+      const folly::SocketAddress& address,
+      const std::unique_ptr<folly::IOBuf>& buf,
+      int gso);
+
+  /**
    * Send data in iovec to destination. Returns the return code from sendmsg.
    */
+  virtual ssize_t writev(
+      const folly::SocketAddress& address,
+      const struct iovec* vec,
+      size_t veclen,
+      int gso);
+
   virtual ssize_t writev(
       const folly::SocketAddress& address,
       const struct iovec* vec,
@@ -162,8 +195,8 @@ class AsyncUDPSocket : public EventHandler {
   /**
    * Get internal FD used by this socket
    */
-  virtual int getFD() const {
-    CHECK_NE(-1, fd_) << "Need to bind before getting FD out";
+  virtual NetworkSocket getNetworkSocket() const {
+    CHECK_NE(NetworkSocket(), fd_) << "Need to bind before getting FD out";
     return fd_;
   }
 
@@ -175,7 +208,7 @@ class AsyncUDPSocket : public EventHandler {
   }
 
   /**
-   * Set SO_REUSEADDR flag on the socket. Default is ON.
+   * Set SO_REUSEADDR flag on the socket. Default is OFF.
    */
   virtual void setReuseAddr(bool reuseAddr) {
     reuseAddr_ = reuseAddr;
@@ -224,10 +257,70 @@ class AsyncUDPSocket : public EventHandler {
    */
   virtual void setErrMessageCallback(ErrMessageCallback* errMessageCallback);
 
- protected:
-  virtual ssize_t sendmsg(int socket, const struct msghdr* message, int flags) {
-    return ::sendmsg(socket, message, flags);
+  /**
+   * Connects the UDP socket to a remote destination address provided in
+   * address. This can speed up UDP writes on linux because it will cache flow
+   * state on connects.
+   * Using connect has many quirks, and you should be aware of them before using
+   * this API:
+   * 1. This must only be called after binding the socket.
+   * 2. Normally UDP can use the 2 tuple (src ip, src port) to steer packets
+   * sent by the peer to the socket, however after connecting the socket, only
+   * packets destined to the destination address specified in connect() will be
+   * forwarded and others will be dropped. If the server can send a packet
+   * from a different destination port / IP then you probably do not want to use
+   * this API.
+   * 3. It can be called repeatedly on either the client or server however it's
+   * normally only useful on the client and not server.
+   *
+   * Returns the result of calling the connect syscall.
+   */
+  virtual int connect(const folly::SocketAddress& address);
+
+  virtual bool isBound() const {
+    return fd_ != NetworkSocket();
   }
+
+  virtual void detachEventBase();
+
+  virtual void attachEventBase(folly::EventBase* evb);
+
+  // generic segmentation offload get/set
+  // negative return value means GSO is not available
+  int getGSO();
+
+  bool setGSO(int val);
+
+  void setTrafficClass(int tclass);
+
+ protected:
+  virtual ssize_t
+  sendmsg(NetworkSocket socket, const struct msghdr* message, int flags) {
+    return netops::sendmsg(socket, message, flags);
+  }
+
+  virtual int sendmmsg(
+      NetworkSocket socket,
+      struct mmsghdr* msgvec,
+      unsigned int vlen,
+      int flags) {
+    return netops::sendmmsg(socket, msgvec, vlen, flags);
+  }
+
+  void fillMsgVec(
+      sockaddr_storage* addr,
+      socklen_t addr_len,
+      const std::unique_ptr<folly::IOBuf>* bufs,
+      size_t count,
+      struct mmsghdr* msgvec,
+      struct iovec* iov,
+      size_t iov_count);
+
+  virtual int writeImpl(
+      const folly::SocketAddress& address,
+      const std::unique_ptr<folly::IOBuf>* bufs,
+      size_t count,
+      struct mmsghdr* msgvec);
 
   size_t handleErrMessages() noexcept;
 
@@ -249,17 +342,25 @@ class AsyncUDPSocket : public EventHandler {
   EventBase* eventBase_;
   folly::SocketAddress localAddress_;
 
-  int fd_;
+  NetworkSocket fd_;
   FDOwnership ownership_;
 
   // Temp space to receive client address
   folly::SocketAddress clientAddress_;
 
-  bool reuseAddr_{true};
+  // If the socket is connected.
+  folly::SocketAddress connectedAddress_;
+  bool connected_{false};
+
+  bool reuseAddr_{false};
   bool reusePort_{false};
   int rcvBuf_{0};
   int sndBuf_{0};
   int busyPollUs_{0};
+
+  // generic segmentation offload value, if available
+  // See https://lwn.net/Articles/188489/ for more details
+  folly::Optional<int> gso_;
 
   ErrMessageCallback* errMessageCallback_{nullptr};
 };

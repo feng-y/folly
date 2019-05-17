@@ -14,13 +14,13 @@
  * limitations under the License.
  */
 
+#include <folly/MacAddress.h>
 #include <folly/Format.h>
 #include <folly/IPAddressV6.h>
-#include <folly/MacAddress.h>
 #include <folly/portability/GTest.h>
 
-using folly::MacAddress;
 using folly::IPAddressV6;
+using folly::MacAddress;
 using folly::StringPiece;
 
 void testMAC(const std::string& str, uint64_t expectedHBO) {
@@ -166,4 +166,13 @@ TEST(MacAddress, ordering) {
   testCmp("00:00:00:00:00:01", "00:00:00:00:00:02");
   testCmp("01:00:00:00:00:00", "02:00:00:00:00:00");
   testCmp("00:00:00:00:00:01", "00:00:00:00:01:00");
+}
+
+TEST(MacAddress, hash) {
+  EXPECT_EQ(
+      std::hash<MacAddress>()(MacAddress("00:11:22:33:44:55")),
+      std::hash<MacAddress>()(MacAddress("00-11-22-33-44-55")));
+  EXPECT_NE(
+      std::hash<MacAddress>()(MacAddress("00:11:22:33:44:55")),
+      std::hash<MacAddress>()(MacAddress("00:11:22:33:44:56")));
 }

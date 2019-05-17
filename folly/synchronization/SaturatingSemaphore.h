@@ -127,7 +127,7 @@ class SaturatingSemaphore {
   };
 
  public:
-  FOLLY_ALWAYS_INLINE static WaitOptions wait_options() {
+  FOLLY_ALWAYS_INLINE static constexpr WaitOptions wait_options() {
     return {};
   }
 
@@ -268,7 +268,7 @@ FOLLY_NOINLINE void SaturatingSemaphore<MayBlock, Atom>::postSlowWaiterMayBlock(
             READY,
             std::memory_order_release,
             std::memory_order_relaxed)) {
-      state_.futexWake();
+      detail::futexWake(&state_);
       return;
     }
   }

@@ -18,8 +18,6 @@
 
 #include <folly/io/async/DelayedDestructionBase.h>
 
-#include <glog/logging.h>
-
 namespace folly {
 
 /**
@@ -96,9 +94,7 @@ class DelayedDestruction : public DelayedDestructionBase {
    */
   ~DelayedDestruction() override = default;
 
-  DelayedDestruction()
-    : destroyPending_(false) {
-  }
+  DelayedDestruction() : destroyPending_(false) {}
 
  private:
   /**

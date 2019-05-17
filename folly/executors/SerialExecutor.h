@@ -16,8 +16,11 @@
 
 #pragma once
 
+#include <atomic>
 #include <memory>
+#include <mutex>
 
+#include <folly/concurrency/UnboundedQueue.h>
 #include <folly/executors/GlobalExecutor.h>
 #include <folly/executors/SequencedExecutor.h>
 
@@ -48,14 +51,33 @@ namespace folly {
 
 class SerialExecutor : public SequencedExecutor {
  public:
-  ~SerialExecutor() override = default;
   SerialExecutor(SerialExecutor const&) = delete;
   SerialExecutor& operator=(SerialExecutor const&) = delete;
-  SerialExecutor(SerialExecutor&&) = default;
-  SerialExecutor& operator=(SerialExecutor&&) = default;
+  SerialExecutor(SerialExecutor&&) = delete;
+  SerialExecutor& operator=(SerialExecutor&&) = delete;
 
-  explicit SerialExecutor(
-      std::shared_ptr<folly::Executor> parent = folly::getCPUExecutor());
+  static KeepAlive<SerialExecutor> create(
+      KeepAlive<Executor> parent = getKeepAliveToken(getCPUExecutor().get()));
+
+  class Deleter {
+   public:
+    Deleter() {}
+
+    void operator()(SerialExecutor* executor) {
+      executor->keepAliveRelease();
+    }
+
+   private:
+    friend class SerialExecutor;
+    explicit Deleter(std::shared_ptr<Executor> parent)
+        : parent_(std::move(parent)) {}
+
+    std::shared_ptr<Executor> parent_;
+  };
+
+  using UniquePtr = std::unique_ptr<SerialExecutor, Deleter>;
+  [[deprecated("Replaced by create")]] static UniquePtr createUnique(
+      std::shared_ptr<Executor> parent = getCPUExecutor());
 
   /**
    * Add one task for execution in the parent executor
@@ -77,11 +99,26 @@ class SerialExecutor : public SequencedExecutor {
     return parent_->getNumPriorities();
   }
 
- private:
-  class TaskQueueImpl;
+ protected:
+  bool keepAliveAcquire() override;
 
-  std::shared_ptr<folly::Executor> parent_;
-  std::shared_ptr<TaskQueueImpl> taskQueueImpl_;
+  void keepAliveRelease() override;
+
+ private:
+  explicit SerialExecutor(KeepAlive<Executor> parent);
+  ~SerialExecutor() override;
+
+  void run();
+
+  KeepAlive<Executor> parent_;
+  std::atomic<std::size_t> scheduled_{0};
+  /**
+   * Unbounded multi producer single consumer queue where consumers don't block
+   * on dequeue.
+   */
+  folly::UnboundedQueue<Func, false, true, false> queue_;
+
+  std::atomic<ssize_t> keepAliveCounter_{1};
 };
 
 } // namespace folly

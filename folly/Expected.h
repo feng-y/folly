@@ -38,6 +38,7 @@
 #include <folly/Unit.h>
 #include <folly/Utility.h>
 #include <folly/lang/ColdClass.h>
+#include <folly/lang/Exception.h>
 
 #define FOLLY_EXPECTED_ID(X) FB_CONCATENATE(FB_CONCATENATE(Folly, X), __LINE__)
 
@@ -100,15 +101,8 @@ namespace expected_detail {
 template <typename Value, typename Error>
 struct PromiseReturn;
 
-#ifdef _MSC_VER
-// MSVC 2015 can't handle the StrictConjunction, so we have
-// to use std::conjunction instead.
-template <template <class...> class Trait, class... Ts>
-using StrictAllOf = std::conjunction<Trait<Ts>...>;
-#else
 template <template <class...> class Trait, class... Ts>
 using StrictAllOf = StrictConjunction<Trait<Ts>...>;
-#endif
 
 template <class T>
 using IsCopyable = StrictConjunction<
@@ -136,27 +130,29 @@ using IsConvertible = StrictConjunction<
     std::is_assignable<To&, From>>;
 
 template <class T, class U>
-auto doEmplaceAssign(int, T& t, U&& u) -> decltype(void(t = (U &&)u)) {
-  t = (U &&)u;
+auto doEmplaceAssign(int, T& t, U&& u)
+    -> decltype(void(t = static_cast<U&&>(u))) {
+  t = static_cast<U&&>(u);
 }
 
 template <class T, class U>
-auto doEmplaceAssign(long, T& t, U&& u) -> decltype(void(T((U &&)u))) {
+auto doEmplaceAssign(long, T& t, U&& u)
+    -> decltype(void(T(static_cast<U&&>(u)))) {
   t.~T();
-  ::new ((void*)std::addressof(t)) T((U &&)u);
+  ::new ((void*)std::addressof(t)) T(static_cast<U&&>(u));
 }
 
 template <class T, class... Us>
 auto doEmplaceAssign(int, T& t, Us&&... us)
-    -> decltype(void(t = T((Us &&)us...))) {
-  t = T((Us &&)us...);
+    -> decltype(void(t = T(static_cast<Us&&>(us)...))) {
+  t = T(static_cast<Us&&>(us)...);
 }
 
 template <class T, class... Us>
 auto doEmplaceAssign(long, T& t, Us&&... us)
-    -> decltype(void(T((Us &&)us...))) {
+    -> decltype(void(T(static_cast<Us&&>(us)...))) {
   t.~T();
-  ::new ((void*)std::addressof(t)) T((Us &&)us...);
+  ::new ((void*)std::addressof(t)) T(static_cast<Us&&>(us)...);
 }
 
 struct EmptyTag {};
@@ -167,7 +163,7 @@ enum class StorageType { ePODStruct, ePODUnion, eUnion };
 
 template <class Value, class Error>
 constexpr StorageType getStorageType() {
-  return StrictAllOf<IsTriviallyCopyable, Value, Error>::value
+  return StrictAllOf<is_trivially_copyable, Value, Error>::value
       ? (sizeof(std::pair<Value, Error>) <= sizeof(void * [2]) &&
                  StrictAllOf<std::is_trivial, Value, Error>::value
              ? StorageType::ePODStruct
@@ -241,11 +237,6 @@ struct ExpectedStorage {
   Value&& value() && {
     return std::move(value_);
   }
-  // TODO (t17322426): remove when VS2015 support is deprecated
-  // VS2015 static analyzer incorrectly flags these as unreachable in certain
-  // circumstances. VS2017 does not have this problem on the same code.
-  FOLLY_PUSH_WARNING
-  FOLLY_MSVC_DISABLE_WARNING(4702) // unreachable code
   Error& error() & {
     return error_;
   }
@@ -255,7 +246,6 @@ struct ExpectedStorage {
   Error&& error() && {
     return std::move(error_);
   }
-  FOLLY_POP_WARNING
 };
 
 template <class Value, class Error>
@@ -542,11 +532,6 @@ struct ExpectedStorage<Value, Error, StorageType::ePODStruct> {
   Value&& value() && {
     return std::move(value_);
   }
-  // TODO (t17322426): remove when VS2015 support is deprecated
-  // VS2015 static analyzer incorrectly flags these as unreachable in certain
-  // circumstances. VS2017 does not have this problem on the same code.
-  FOLLY_PUSH_WARNING
-  FOLLY_MSVC_DISABLE_WARNING(4702) // unreachable code
   Error& error() & {
     return error_;
   }
@@ -556,7 +541,6 @@ struct ExpectedStorage<Value, Error, StorageType::ePODStruct> {
   Error&& error() && {
     return std::move(error_);
   }
-  FOLLY_POP_WARNING
 };
 
 namespace expected_detail_ExpectedHelper {
@@ -620,7 +604,7 @@ struct ExpectedHelper {
     if (LIKELY(ex.which_ == expected_detail::Which::eValue)) {
       return Ret(static_cast<Yes&&>(yes)(static_cast<This&&>(ex).value()));
     }
-    throw static_cast<No&&>(no)(static_cast<This&&>(ex).error());
+    throw_exception(static_cast<No&&>(no)(static_cast<This&&>(ex).error()));
   }
 
   template <
@@ -635,8 +619,8 @@ struct ExpectedHelper {
       return Ret(static_cast<Yes&&>(yes)(static_cast<This&&>(ex).value()));
     }
     static_cast<No&&>(no)(ex.error());
-    throw typename Unexpected<ExpectedErrorType<This>>::MakeBadExpectedAccess()(
-        static_cast<This&&>(ex).error());
+    typename Unexpected<ExpectedErrorType<This>>::MakeBadExpectedAccess bad;
+    throw_exception(bad(static_cast<This&&>(ex).error()));
   }
   FOLLY_POP_WARNING
 };
@@ -664,9 +648,7 @@ class FOLLY_EXPORT BadExpectedAccess : public std::logic_error {
 };
 
 namespace expected_detail {
-
-[[noreturn]] void throwBadExpectedAccess();
-
+// empty
 } // namespace expected_detail
 
 /**
@@ -904,8 +886,6 @@ class Expected final : expected_detail::ExpectedStorage<Value, Error> {
  public:
   using value_type = Value;
   using error_type = Error;
-  using IsTriviallyCopyable = typename expected_detail::
-      StrictAllOf<IsTriviallyCopyable, Value, Error>::type;
 
   template <class U>
   using rebind = Expected<U, Error>;
@@ -1065,7 +1045,7 @@ class Expected final : expected_detail::ExpectedStorage<Value, Error> {
   void swap(Expected& that) noexcept(
       expected_detail::StrictAllOf<IsNothrowSwappable, Value, Error>::value) {
     if (this->uninitializedByException() || that.uninitializedByException()) {
-      expected_detail::throwBadExpectedAccess();
+      throw_exception<BadExpectedAccess>();
     }
     using std::swap;
     if (*this) {
@@ -1205,7 +1185,7 @@ class Expected final : expected_detail::ExpectedStorage<Value, Error> {
           std::declval<const Base&>(),
           std::declval<Fns>()...)) {
     if (this->uninitializedByException()) {
-      expected_detail::throwBadExpectedAccess();
+      throw_exception<BadExpectedAccess>();
     }
     return expected_detail::ExpectedHelper::then_(
         base(), static_cast<Fns&&>(fns)...);
@@ -1216,7 +1196,7 @@ class Expected final : expected_detail::ExpectedStorage<Value, Error> {
       std::declval<Base&>(),
       std::declval<Fns>()...)) {
     if (this->uninitializedByException()) {
-      expected_detail::throwBadExpectedAccess();
+      throw_exception<BadExpectedAccess>();
     }
     return expected_detail::ExpectedHelper::then_(
         base(), static_cast<Fns&&>(fns)...);
@@ -1227,7 +1207,7 @@ class Expected final : expected_detail::ExpectedStorage<Value, Error> {
       std::declval<Base&&>(),
       std::declval<Fns>()...)) {
     if (this->uninitializedByException()) {
-      expected_detail::throwBadExpectedAccess();
+      throw_exception<BadExpectedAccess>();
     }
     return expected_detail::ExpectedHelper::then_(
         std::move(base()), static_cast<Fns&&>(fns)...);
@@ -1241,7 +1221,7 @@ class Expected final : expected_detail::ExpectedStorage<Value, Error> {
       std::declval<Yes>()(std::declval<const Value&>())) {
     using Ret = decltype(std::declval<Yes>()(std::declval<const Value&>()));
     if (this->uninitializedByException()) {
-      expected_detail::throwBadExpectedAccess();
+      throw_exception<BadExpectedAccess>();
     }
     return Ret(expected_detail::ExpectedHelper::thenOrThrow_(
         base(), static_cast<Yes&&>(yes), static_cast<No&&>(no)));
@@ -1252,7 +1232,7 @@ class Expected final : expected_detail::ExpectedStorage<Value, Error> {
       std::declval<Yes>()(std::declval<Value&>())) {
     using Ret = decltype(std::declval<Yes>()(std::declval<Value&>()));
     if (this->uninitializedByException()) {
-      expected_detail::throwBadExpectedAccess();
+      throw_exception<BadExpectedAccess>();
     }
     return Ret(expected_detail::ExpectedHelper::thenOrThrow_(
         base(), static_cast<Yes&&>(yes), static_cast<No&&>(no)));
@@ -1263,7 +1243,7 @@ class Expected final : expected_detail::ExpectedStorage<Value, Error> {
       std::declval<Yes>()(std::declval<Value&&>())) {
     using Ret = decltype(std::declval<Yes>()(std::declval<Value&&>()));
     if (this->uninitializedByException()) {
-      expected_detail::throwBadExpectedAccess();
+      throw_exception<BadExpectedAccess>();
     }
     return Ret(expected_detail::ExpectedHelper::thenOrThrow_(
         std::move(base()), static_cast<Yes&&>(yes), static_cast<No&&>(no)));
@@ -1273,15 +1253,16 @@ class Expected final : expected_detail::ExpectedStorage<Value, Error> {
   void requireValue() const {
     if (UNLIKELY(!hasValue())) {
       if (LIKELY(hasError())) {
-        throw typename Unexpected<Error>::BadExpectedAccess(this->error_);
+        using Err = typename Unexpected<Error>::BadExpectedAccess;
+        throw_exception<Err>(this->error_);
       }
-      expected_detail::throwBadExpectedAccess();
+      throw_exception<BadExpectedAccess>();
     }
   }
 
   void requireError() const {
     if (UNLIKELY(!hasError())) {
-      expected_detail::throwBadExpectedAccess();
+      throw_exception<BadExpectedAccess>();
     }
   }
 
@@ -1296,7 +1277,7 @@ operator==(
     const Expected<Value, Error>& lhs,
     const Expected<Value, Error>& rhs) {
   if (UNLIKELY(lhs.uninitializedByException())) {
-    expected_detail::throwBadExpectedAccess();
+    throw_exception<BadExpectedAccess>();
   }
   if (UNLIKELY(lhs.which_ != rhs.which_)) {
     return false;
@@ -1323,7 +1304,7 @@ operator<(
     const Expected<Value, Error>& rhs) {
   if (UNLIKELY(
           lhs.uninitializedByException() || rhs.uninitializedByException())) {
-    expected_detail::throwBadExpectedAccess();
+    throw_exception<BadExpectedAccess>();
   }
   if (UNLIKELY(lhs.hasError())) {
     return !rhs.hasError();
@@ -1364,8 +1345,8 @@ inline bool operator>=(
 /**
  * swap Expected values
  */
-template <class Error, class Value>
-void swap(Expected<Error, Value>& lhs, Expected<Value, Error>& rhs) noexcept(
+template <class Value, class Error>
+void swap(Expected<Value, Error>& lhs, Expected<Value, Error>& rhs) noexcept(
     expected_detail::StrictAllOf<IsNothrowSwappable, Value, Error>::value) {
   lhs.swap(rhs);
 }

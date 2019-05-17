@@ -24,9 +24,9 @@
  * - EXPECT_THROW_ERRNO(), ASSERT_THROW_ERRNO()
  * - AreWithinSecs()
  *
- * Additionally, it includes a PrintTo() function for StringPiece.
- * Including this file in your tests will ensure that StringPiece is printed
- * nicely when used in EXPECT_EQ() or EXPECT_NE() checks.
+ * It also imports PrintTo() functions for StringPiece, FixedString and
+ * FBString. Including this file in your tests will ensure that they are printed
+ * as strings by googletest - for example in failing EXPECT_EQ() checks.
  */
 
 #include <chrono>
@@ -36,6 +36,8 @@
 
 #include <folly/Conv.h>
 #include <folly/ExceptionString.h>
+#include <folly/FBString.h>
+#include <folly/FixedString.h>
 #include <folly/Range.h>
 #include <folly/portability/GTest.h>
 
@@ -43,17 +45,20 @@
 // the test due to runtime issues or behavior that do not necessarily indicate
 // a problem with the code.
 //
-// googletest does not have a built-in mechanism to report tests as skipped a
-// run time.  We either report the test as successful or failure based on the
-// FOLLY_SKIP_AS_FAILURE configuration setting.  The default is to report the
-// test as successful.  Enabling FOLLY_SKIP_AS_FAILURE can be useful with a
-// test harness that can identify the "Test skipped by client" in the failure
-// message and convert this into a skipped test result.
-#if FOLLY_SKIP_AS_FAILURE
-#define SKIP() GTEST_FATAL_FAILURE_("Test skipped by client")
-#else
-#define SKIP() return GTEST_SUCCESS_("Test skipped by client")
-#endif
+// googletest does not have a built-in mechanism to report tests as
+// skipped a run time.  We either report the test as successful or
+// failure based on whether the TEST_PILOT environment variable is
+// set.  The default is to report the test as successful.  Enabling
+// FOLLY_SKIP_AS_FAILURE can be useful with a test harness that can
+// identify the "Test skipped by client" in the failure message and
+// convert this into a skipped test result.
+#define SKIP()                                       \
+  GTEST_AMBIGUOUS_ELSE_BLOCKER_                      \
+  return GTEST_MESSAGE_(                             \
+      "Test skipped by client",                      \
+      ::folly::test::detail::skipIsFailure()         \
+          ? ::testing::TestPartResult::kFatalFailure \
+          : ::testing::TestPartResult::kSuccess)
 
 // Encapsulate conditional-skip, since it's nontrivial to get right.
 #define SKIP_IF(expr)           \
@@ -140,6 +145,11 @@ AreWithinSecs(T1 val1, T2 val2, std::chrono::seconds acceptableDeltaSecs) {
 }
 
 namespace detail {
+
+inline bool skipIsFailure() {
+  const char* p = getenv("FOLLY_SKIP_AS_FAILURE");
+  return p && (0 == strcmp(p, "1"));
+}
 
 /**
  * Helper class for implementing test macros
@@ -264,16 +274,41 @@ CheckResult checkThrowRegex(
 } // namespace detail
 } // namespace test
 
-// Define a PrintTo() function for StringPiece, so that gtest checks
-// will print it as a string.  Without this gtest identifies StringPiece as a
-// container type, and therefore tries printing its elements individually,
-// despite the fact that there is an ostream operator<<() defined for
-// StringPiece.
-inline void PrintTo(StringPiece sp, ::std::ostream* os) {
-  // gtest's PrintToString() function will quote the string and escape internal
-  // quotes and non-printable characters, the same way gtest does for the
-  // standard string types.
-  *os << ::testing::PrintToString(sp.str());
+// Define PrintTo() functions for StringPiece/FixedString/fbstring, so that
+// gtest checks will print them as strings.  Without these gtest identifies them
+// as container types, and therefore tries printing the elements individually,
+// despite the fact that there is an ostream operator<<() defined for each of
+// them.
+//
+// gtest's PrintToString() function is used to quote the string and escape
+// internal quotes and non-printable characters, the same way gtest does for the
+// string types it directly supports.
+inline void PrintTo(StringPiece const& stringPiece, std::ostream* out) {
+  *out << ::testing::PrintToString(stringPiece.str());
 }
 
+inline void PrintTo(
+    Range<wchar_t const*> const& stringPiece,
+    std::ostream* out) {
+  *out << ::testing::PrintToString(
+      std::wstring(stringPiece.begin(), stringPiece.size()));
+}
+
+template <typename CharT, size_t N>
+void PrintTo(
+    BasicFixedString<CharT, N> const& someFixedString,
+    std::ostream* out) {
+  *out << ::testing::PrintToString(someFixedString.toStdString());
+}
+
+template <typename CharT, class Storage>
+void PrintTo(
+    basic_fbstring<
+        CharT,
+        std::char_traits<CharT>,
+        std::allocator<CharT>,
+        Storage> const& someFbString,
+    std::ostream* out) {
+  *out << ::testing::PrintToString(someFbString.toStdString());
+}
 } // namespace folly

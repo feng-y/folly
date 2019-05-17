@@ -32,6 +32,7 @@
 #include <folly/Traits.h>
 #include <folly/Utility.h>
 #include <folly/container/Foreach.h>
+#include <folly/functional/ApplyTuple.h>
 #include <glog/logging.h>
 
 #include <array>
@@ -46,8 +47,6 @@ template <class LockedType, class Mutex, class LockPolicy>
 class LockedPtrBase;
 template <class LockedType, class LockPolicy>
 class LockedPtr;
-template <class LockedType, class LockPolicy = LockPolicyExclusive>
-class LockedGuardPtr;
 
 /**
  * Public version of LockInterfaceDispatcher that contains the MutexLevel enum
@@ -84,15 +83,25 @@ class SynchronizedBase;
 template <class Subclass>
 class SynchronizedBase<Subclass, detail::MutexLevel::SHARED> {
  public:
-  using LockedPtr = ::folly::LockedPtr<Subclass, LockPolicyExclusive>;
+  using WLockedPtr = ::folly::LockedPtr<Subclass, LockPolicyExclusive>;
   using ConstWLockedPtr =
       ::folly::LockedPtr<const Subclass, LockPolicyExclusive>;
-  using ConstLockedPtr = ::folly::LockedPtr<const Subclass, LockPolicyShared>;
+
+  using RLockedPtr = ::folly::LockedPtr<const Subclass, LockPolicyShared>;
+  using ConstRLockedPtr = ::folly::LockedPtr<const Subclass, LockPolicyShared>;
 
   using TryWLockedPtr = ::folly::LockedPtr<Subclass, LockPolicyTryExclusive>;
   using ConstTryWLockedPtr =
       ::folly::LockedPtr<const Subclass, LockPolicyTryExclusive>;
-  using TryRLockedPtr = ::folly::LockedPtr<const Subclass, LockPolicyTryShared>;
+
+  using TryRLockedPtr = ::folly::LockedPtr<Subclass, LockPolicyTryShared>;
+  using ConstTryRLockedPtr =
+      ::folly::LockedPtr<const Subclass, LockPolicyTryShared>;
+
+  // These aliases are deprecated.
+  // TODO: Codemod them away.
+  using LockedPtr = WLockedPtr;
+  using ConstLockedPtr = ConstRLockedPtr;
 
   /**
    * Acquire an exclusive lock, and return a LockedPtr that can be used to
@@ -123,9 +132,13 @@ class SynchronizedBase<Subclass, detail::MutexLevel::SHARED> {
   }
 
   /**
-   * Acquire a read lock, and return a ConstLockedPtr that can be used to
-   * safely access the datum.
+   * Acquire a read lock. The returned LockedPtr will have force const
+   * access to the data unless the lock is acquired in non-const
+   * context and asNonConstUnsafe() is used.
    */
+  RLockedPtr rlock() {
+    return RLockedPtr(static_cast<Subclass*>(this));
+  }
   ConstLockedPtr rlock() const {
     return ConstLockedPtr(static_cast<const Subclass*>(this));
   }
@@ -137,8 +150,11 @@ class SynchronizedBase<Subclass, detail::MutexLevel::SHARED> {
    * (Use LockedPtr::operator bool() or LockedPtr::isNull() to check for
    * validity.)
    */
-  TryRLockedPtr tryRLock() const {
-    return TryRLockedPtr{static_cast<const Subclass*>(this)};
+  TryRLockedPtr tryRLock() {
+    return TryRLockedPtr{static_cast<Subclass*>(this)};
+  }
+  ConstTryRLockedPtr tryRLock() const {
+    return ConstTryRLockedPtr{static_cast<const Subclass*>(this)};
   }
 
   /**
@@ -153,9 +169,8 @@ class SynchronizedBase<Subclass, detail::MutexLevel::SHARED> {
     return LockedPtr(static_cast<Subclass*>(this), timeout);
   }
   template <class Rep, class Period>
-  ConstWLockedPtr wlock(
-      const std::chrono::duration<Rep, Period>& timeout) const {
-    return ConstWLockedPtr(static_cast<const Subclass*>(this), timeout);
+  LockedPtr wlock(const std::chrono::duration<Rep, Period>& timeout) const {
+    return LockedPtr(static_cast<const Subclass*>(this), timeout);
   }
 
   /**
@@ -170,12 +185,6 @@ class SynchronizedBase<Subclass, detail::MutexLevel::SHARED> {
       const std::chrono::duration<Rep, Period>& timeout) const {
     return ConstLockedPtr(static_cast<const Subclass*>(this), timeout);
   }
-
-  /*
-   * Note: C++ 17 adds guaranteed copy elision.  (http://wg21.link/P0135)
-   * Once compilers support this, it would be nice to add wguard() and rguard()
-   * methods that return LockedGuardPtr objects.
-   */
 
   /**
    * Invoke a function while holding the lock exclusively.
@@ -193,15 +202,11 @@ class SynchronizedBase<Subclass, detail::MutexLevel::SHARED> {
    */
   template <class Function>
   auto withWLock(Function&& function) {
-    LockedGuardPtr<Subclass, LockPolicyExclusive> guardPtr(
-        static_cast<Subclass*>(this));
-    return function(*guardPtr);
+    return function(*wlock());
   }
   template <class Function>
   auto withWLock(Function&& function) const {
-    LockedGuardPtr<const Subclass, LockPolicyExclusive> guardPtr(
-        static_cast<const Subclass*>(this));
-    return function(*guardPtr);
+    return function(*wlock());
   }
 
   /**
@@ -230,9 +235,12 @@ class SynchronizedBase<Subclass, detail::MutexLevel::SHARED> {
    */
   template <class Function>
   auto withRLock(Function&& function) const {
-    LockedGuardPtr<const Subclass, LockPolicyShared> guardPtr(
-        static_cast<const Subclass*>(this));
-    return function(*guardPtr);
+    return function(*rlock());
+  }
+
+  template <class Function>
+  auto withRLockPtr(Function&& function) {
+    return function(rlock());
   }
 
   template <class Function>
@@ -246,7 +254,7 @@ class SynchronizedBase<Subclass, detail::MutexLevel::SHARED> {
  *
  * This class provides all the functionality provided by the SynchronizedBase
  * specialization for shared mutexes and a ulock() method that returns an
- * upgradable lock RAII proxy
+ * upgrade lock RAII proxy
  */
 template <class Subclass>
 class SynchronizedBase<Subclass, detail::MutexLevel::UPGRADE>
@@ -255,10 +263,6 @@ class SynchronizedBase<Subclass, detail::MutexLevel::UPGRADE>
   using UpgradeLockedPtr = ::folly::LockedPtr<Subclass, LockPolicyUpgrade>;
   using ConstUpgradeLockedPtr =
       ::folly::LockedPtr<const Subclass, LockPolicyUpgrade>;
-  using UpgradeLockedGuardPtr =
-      ::folly::LockedGuardPtr<Subclass, LockPolicyUpgrade>;
-  using ConstUpgradeLockedGuardPtr =
-      ::folly::LockedGuardPtr<const Subclass, LockPolicyUpgrade>;
 
   using TryUpgradeLockedPtr =
       ::folly::LockedPtr<Subclass, LockPolicyTryUpgrade>;
@@ -266,10 +270,9 @@ class SynchronizedBase<Subclass, detail::MutexLevel::UPGRADE>
       ::folly::LockedPtr<const Subclass, LockPolicyTryUpgrade>;
 
   /**
-   * Acquire an upgrade lock and return a LockedPtr that can be used to safely
-   * access the datum
-   *
-   * And the const version
+   * Acquire an upgrade lock. The returned LockedPtr will have force
+   * const access to the data unless the lock is acquired in non-const
+   * context and asNonConstUnsafe() is used.
    */
   UpgradeLockedPtr ulock() {
     return UpgradeLockedPtr(static_cast<Subclass*>(this));
@@ -288,9 +291,6 @@ class SynchronizedBase<Subclass, detail::MutexLevel::UPGRADE>
   TryUpgradeLockedPtr tryULock() {
     return TryUpgradeLockedPtr{static_cast<Subclass*>(this)};
   }
-  ConstTryUpgradeLockedPtr tryULock() const {
-    return ConstTryUpgradeLockedPtr{static_cast<const Subclass*>(this)};
-  }
 
   /**
    * Acquire an upgrade lock and return a LockedPtr that can be used to safely
@@ -301,11 +301,6 @@ class SynchronizedBase<Subclass, detail::MutexLevel::UPGRADE>
   template <class Rep, class Period>
   UpgradeLockedPtr ulock(const std::chrono::duration<Rep, Period>& timeout) {
     return UpgradeLockedPtr(static_cast<Subclass*>(this), timeout);
-  }
-  template <class Rep, class Period>
-  UpgradeLockedPtr ulock(
-      const std::chrono::duration<Rep, Period>& timeout) const {
-    return ConstUpgradeLockedPtr(static_cast<const Subclass*>(this), timeout);
   }
 
   /**
@@ -329,9 +324,12 @@ class SynchronizedBase<Subclass, detail::MutexLevel::UPGRADE>
    * moveFromUpgradeToWrite() method)
    */
   template <class Function>
+  auto withULock(Function&& function) {
+    return function(*ulock());
+  }
+  template <class Function>
   auto withULock(Function&& function) const {
-    ConstUpgradeLockedGuardPtr guardPtr(static_cast<const Subclass*>(this));
-    return function(*guardPtr);
+    return function(*ulock());
   }
 
   /**
@@ -421,12 +419,6 @@ class SynchronizedBase<Subclass, detail::MutexLevel::UNIQUE> {
     return ConstLockedPtr(static_cast<const Subclass*>(this), timeout);
   }
 
-  /*
-   * Note: C++ 17 adds guaranteed copy elision.  (http://wg21.link/P0135)
-   * Once compilers support this, it would be nice to add guard() methods that
-   * return LockedGuardPtr objects.
-   */
-
   /**
    * Invoke a function while holding the lock.
    *
@@ -443,15 +435,11 @@ class SynchronizedBase<Subclass, detail::MutexLevel::UNIQUE> {
    */
   template <class Function>
   auto withLock(Function&& function) {
-    LockedGuardPtr<Subclass, LockPolicyExclusive> guardPtr(
-        static_cast<Subclass*>(this));
-    return function(*guardPtr);
+    return function(*lock());
   }
   template <class Function>
   auto withLock(Function&& function) const {
-    LockedGuardPtr<const Subclass, LockPolicyExclusive> guardPtr(
-        static_cast<const Subclass*>(this));
-    return function(*guardPtr);
+    return function(*lock());
   }
 
   /**
@@ -523,33 +511,36 @@ struct Synchronized : public SynchronizedBase<
    */
   Synchronized() = default;
 
-  /**
-   * Copy constructor copies the data (with locking the source and
-   * all) but does NOT copy the mutex. Doing so would result in
-   * deadlocks.
-   *
-   * Note that the copy constructor may throw because it acquires a lock in
-   * the contextualRLock() method
-   */
  public:
+  /**
+   * Copy constructor; deprecated
+   *
+   * Enabled only when the data type is copy-constructible.
+   *
+   * Takes a shared-or-exclusive lock on the source mutex while performing the
+   * copy-construction of the destination data from the source data. No lock is
+   * taken on the destination mutex.
+   *
+   * May throw even when the data type is is nothrow-copy-constructible because
+   * acquiring a lock may throw.
+   */
   /* implicit */ Synchronized(typename std::conditional<
                               std::is_copy_constructible<T>::value,
                               const Synchronized&,
                               NonImplementedType>::type rhs) /* may throw */
-      : Synchronized(rhs, rhs.contextualRLock()) {}
+      : Synchronized(rhs.copy()) {}
 
   /**
-   * Move constructor moves the data (with locking the source and all)
-   * but does not move the mutex.
+   * Move constructor; deprecated
    *
-   * Note that the move constructor may throw because it acquires a lock.
-   * Since the move constructor is not declared noexcept, when objects of this
-   * class are used as elements in a vector or a similar container.  The
-   * elements might not be moved around when resizing.  They might be copied
-   * instead.  You have been warned.
+   * Move-constructs from the source data without locking either the source or
+   * the destination mutex.
+   *
+   * Semantically, assumes that the source object is a true rvalue and therefore
+   * that no synchronization is required for accessing it.
    */
-  Synchronized(Synchronized&& rhs) /* may throw */
-      : Synchronized(std::move(rhs), rhs.contextualLock()) {}
+  Synchronized(Synchronized&& rhs) noexcept(nxMoveCtor)
+      : Synchronized(std::move(rhs.datum_)) {}
 
   /**
    * Constructor taking a datum as argument copies it. There is no
@@ -584,58 +575,53 @@ struct Synchronized : public SynchronizedBase<
       : Synchronized{std::piecewise_construct,
                      std::move(datumArgs),
                      std::move(mutexArgs),
-                     make_index_sequence<sizeof...(DatumArgs)>{},
-                     make_index_sequence<sizeof...(MutexArgs)>{}} {}
+                     std::make_index_sequence<sizeof...(DatumArgs)>{},
+                     std::make_index_sequence<sizeof...(MutexArgs)>{}} {}
 
   /**
-   * The canonical assignment operator only assigns the data, NOT the
-   * mutex. It locks the two objects in ascending order of their
-   * addresses.
+   * Copy assignment operator; deprecated
+   *
+   * Enabled only when the data type is copy-constructible and move-assignable.
+   *
+   * Move-assigns from a copy of the source data.
+   *
+   * Takes a shared-or-exclusive lock on the source mutex while copying the
+   * source data to a temporary. Takes an exclusive lock on the destination
+   * mutex while move-assigning from the temporary.
+   *
+   * This technique consts an extra temporary but avoids the need to take locks
+   * on both mutexes together.
    */
   Synchronized& operator=(typename std::conditional<
-                          std::is_copy_assignable<T>::value,
+                          std::is_copy_constructible<T>::value &&
+                              std::is_move_assignable<T>::value,
                           const Synchronized&,
                           NonImplementedType>::type rhs) {
-    if (this == &rhs) {
-      // Self-assignment, pass.
-    } else if (this < &rhs) {
-      auto guard1 = operator->();
-      auto guard2 = rhs.operator->();
-      datum_ = rhs.datum_;
-    } else {
-      auto guard1 = rhs.operator->();
-      auto guard2 = operator->();
-      datum_ = rhs.datum_;
-    }
-    return *this;
+    return *this = rhs.copy();
   }
 
   /**
-   * Move assignment operator, only assigns the data, NOT the
-   * mutex. It locks the two objects in ascending order of their
-   * addresses.
+   * Move assignment operator; deprecated
+   *
+   * Takes an exclusive lock on the destination mutex while move-assigning the
+   * destination data from the source data. The source mutex is not locked or
+   * otherwise accessed.
+   *
+   * Semantically, assumes that the source object is a true rvalue and therefore
+   * that no synchronization is required for accessing it.
    */
   Synchronized& operator=(Synchronized&& rhs) {
-    if (this == &rhs) {
-      // Self-assignment, pass.
-    } else if (this < &rhs) {
-      auto guard1 = operator->();
-      auto guard2 = rhs.operator->();
-      datum_ = std::move(rhs.datum_);
-    } else {
-      auto guard1 = rhs.operator->();
-      auto guard2 = operator->();
-      datum_ = std::move(rhs.datum_);
-    }
-    return *this;
+    return *this = std::move(rhs.datum_);
   }
 
   /**
    * Lock object, assign datum.
    */
   Synchronized& operator=(const T& rhs) {
-    auto guard = operator->();
-    datum_ = rhs;
+    if (&datum_ != &rhs) {
+      auto guard = operator->();
+      datum_ = rhs;
+    }
     return *this;
   }
 
@@ -643,8 +629,10 @@ struct Synchronized : public SynchronizedBase<
    * Lock object, move-assign datum.
    */
   Synchronized& operator=(T&& rhs) {
-    auto guard = operator->();
-    datum_ = std::move(rhs);
+    if (&datum_ != &rhs) {
+      auto guard = operator->();
+      datum_ = std::move(rhs);
+    }
     return *this;
   }
 
@@ -739,19 +727,6 @@ struct Synchronized : public SynchronizedBase<
   }
 
   /**
-   * Sometimes, although you have a mutable object, you only want to
-   * call a const method against it. The most efficient way to achieve
-   * that is by using a read lock. You get to do so by using
-   * obj.asConst()->method() instead of obj->method().
-   *
-   * NOTE: This API is planned to be deprecated in an upcoming diff.
-   * Use rlock() instead.
-   */
-  const Synchronized& asConst() const {
-    return *this;
-  }
-
-  /**
    * Swaps with another Synchronized. Protected against
    * self-swap. Only data is swapped. Locks are acquired in increasing
    * address order.
@@ -793,9 +768,9 @@ struct Synchronized : public SynchronizedBase<
   /**
    * Copies datum to a given target.
    */
-  void copy(T* target) const {
+  void copyInto(T& target) const {
     ConstLockedPtr guard(this);
-    *target = datum_;
+    target = datum_;
   }
 
   /**
@@ -811,8 +786,6 @@ struct Synchronized : public SynchronizedBase<
   friend class folly::LockedPtrBase;
   template <class LockedType, class LockPolicy>
   friend class folly::LockedPtr;
-  template <class LockedType, class LockPolicy>
-  friend class folly::LockedGuardPtr;
 
   /**
    * Helper constructors to enable Synchronized for
@@ -838,8 +811,8 @@ struct Synchronized : public SynchronizedBase<
       std::piecewise_construct_t,
       std::tuple<DatumArgs...> datumArgs,
       std::tuple<MutexArgs...> mutexArgs,
-      index_sequence<IndicesOne...>,
-      index_sequence<IndicesTwo...>)
+      std::index_sequence<IndicesOne...>,
+      std::index_sequence<IndicesTwo...>)
       : datum_{std::get<IndicesOne>(std::move(datumArgs))...},
         mutex_{std::get<IndicesTwo>(std::move(mutexArgs))...} {}
 
@@ -856,9 +829,9 @@ namespace detail {
  * A helper alias that resolves to "const T" if the template parameter
  * is a const Synchronized<T>, or "T" if the parameter is not const.
  */
-template <class SynchronizedType>
+template <class SynchronizedType, bool AllowsConcurrentAccess>
 using SynchronizedDataType = typename std::conditional<
-    std::is_const<SynchronizedType>::value,
+    AllowsConcurrentAccess || std::is_const<SynchronizedType>::value,
     typename SynchronizedType::DataType const,
     typename SynchronizedType::DataType>::type;
 /*
@@ -871,85 +844,62 @@ using LockedPtrType = typename std::conditional<
     typename SynchronizedType::ConstLockedPtr,
     typename SynchronizedType::LockedPtr>::type;
 
-template <typename Synchronized>
-class SynchronizedLockerBase {
+template <
+    typename Synchronized,
+    typename LockFunc,
+    typename TryLockFunc,
+    typename... Args>
+class SynchronizedLocker {
  public:
-  explicit SynchronizedLockerBase(Synchronized& sync) : synchronized{sync} {}
+  using LockedPtr = invoke_result_t<LockFunc&, Synchronized&, const Args&...>;
 
- protected:
-  Synchronized& synchronized;
-};
+  template <typename LockFuncType, typename TryLockFuncType, typename... As>
+  SynchronizedLocker(
+      Synchronized& sync,
+      LockFuncType&& lockFunc,
+      TryLockFuncType tryLockFunc,
+      As&&... as)
+      : synchronized{sync},
+        lockFunc_{std::forward<LockFuncType>(lockFunc)},
+        tryLockFunc_{std::forward<TryLockFuncType>(tryLockFunc)},
+        args_{std::forward<As>(as)...} {}
 
-template <typename Synchronized>
-class SynchronizedWLocker : public SynchronizedLockerBase<Synchronized> {
- public:
-  using SynchronizedLockerBase<Synchronized>::SynchronizedLockerBase;
-  using LockedPtr = typename Synchronized::LockedPtr;
-
-  auto lock() {
-    return this->synchronized.wlock();
+  auto lock() const {
+    auto args = std::tuple<const Args&...>{args_};
+    return apply(lockFunc_, std::tuple_cat(std::tie(synchronized), args));
   }
-  auto tryLock() {
-    return this->synchronized.tryWLock();
-  }
-};
-template <typename Synchronized>
-class SynchronizedRLocker : public SynchronizedLockerBase<Synchronized> {
- public:
-  using SynchronizedLockerBase<Synchronized>::SynchronizedLockerBase;
-  using LockedPtr = typename Synchronized::ConstLockedPtr;
-
-  auto lock() {
-    return this->synchronized.rlock();
-  }
-  auto tryLock() {
-    return this->synchronized.tryRLock();
-  }
-};
-template <typename Synchronized>
-class SynchronizedULocker : public SynchronizedLockerBase<Synchronized> {
- public:
-  using SynchronizedLockerBase<Synchronized>::SynchronizedLockerBase;
-  using LockedPtr = typename Synchronized::UpgradeLockedPtr;
-
-  auto lock() {
-    return this->synchronized.ulock();
-  }
-  auto tryLock() {
-    return this->synchronized.tryULock();
-  }
-};
-template <typename Synchronized>
-class SynchronizedLocker : public SynchronizedLockerBase<Synchronized> {
- public:
-  using SynchronizedLockerBase<Synchronized>::SynchronizedLockerBase;
-  using LockedPtr = typename Synchronized::LockedPtr;
-
-  auto lock() {
-    return this->synchronized.lock();
-  }
-  auto tryLock() {
-    return this->synchronized.tryLock();
-  }
-};
-template <typename Lockable>
-class LockableLocker {
- public:
-  explicit LockableLocker(Lockable& lockableIn) : lockable{lockableIn} {}
-  using LockedPtr = std::unique_lock<Lockable>;
-
-  auto lock() {
-    return std::unique_lock<Lockable>{lockable};
-  }
-  auto tryLock() {
-    auto lock = std::unique_lock<Lockable>{lockable, std::defer_lock};
-    lock.try_lock();
-    return lock;
+  auto tryLock() const {
+    return tryLockFunc_(synchronized);
   }
 
  private:
-  Lockable& lockable;
+  Synchronized& synchronized;
+  LockFunc lockFunc_;
+  TryLockFunc tryLockFunc_;
+  std::tuple<Args...> args_;
 };
+
+template <
+    typename Synchronized,
+    typename LockFunc,
+    typename TryLockFunc,
+    typename... Args>
+auto makeSynchronizedLocker(
+    Synchronized& synchronized,
+    LockFunc&& lockFunc,
+    TryLockFunc&& tryLockFunc,
+    Args&&... args) {
+  using LockFuncType = std::decay_t<LockFunc>;
+  using TryLockFuncType = std::decay_t<TryLockFunc>;
+  return SynchronizedLocker<
+      Synchronized,
+      LockFuncType,
+      TryLockFuncType,
+      std::decay_t<Args>...>{synchronized,
+                             std::forward<LockFunc>(lockFunc),
+                             std::forward<TryLockFunc>(tryLockFunc),
+                             std::forward<Args>(args)...};
+}
 
 /**
  * Acquire locks for multiple Synchronized<T> objects, in a deadlock-safe
@@ -968,7 +918,8 @@ class LockableLocker {
  * See the benchmarks in folly/test/SynchronizedBenchmark.cpp for more.
  */
 template <typename... SynchronizedLocker>
-auto /* std::tuple<LockedPtr...> */ lock(SynchronizedLocker... lockersIn) {
+auto lock(SynchronizedLocker... lockersIn)
+    -> std::tuple<typename SynchronizedLocker::LockedPtr...> {
   // capture the list of lockers as a tuple
   auto lockers = std::forward_as_tuple(lockersIn...);
 
@@ -982,7 +933,7 @@ auto /* std::tuple<LockedPtr...> */ lock(SynchronizedLocker... lockersIn) {
   while (true) {
     auto couldLockAll = true;
 
-    folly::for_each(lockers, [&](auto& locker, auto index) {
+    for_each(lockers, [&](auto& locker, auto index) {
       // if we should try_lock on the current locker then do so
       if (index != indexLocked) {
         auto lockedPtr = locker.tryLock();
@@ -1000,24 +951,65 @@ auto /* std::tuple<LockedPtr...> */ lock(SynchronizedLocker... lockersIn) {
           lockedPtrs = std::tuple<typename SynchronizedLocker::LockedPtr...>{};
 
           std::this_thread::yield();
-          folly::fetch(lockedPtrs, index) = locker.lock();
+          fetch(lockedPtrs, index) = locker.lock();
           indexLocked = index;
           couldLockAll = false;
 
-          return folly::loop_break;
+          return loop_break;
         }
 
         // else store the locked mutex in the list we return
-        folly::fetch(lockedPtrs, index) = std::move(lockedPtr);
+        fetch(lockedPtrs, index) = std::move(lockedPtr);
       }
 
-      return folly::loop_continue;
+      return loop_continue;
     });
 
     if (couldLockAll) {
       return lockedPtrs;
     }
   }
+}
+
+template <typename Synchronized, typename... Args>
+auto wlock(Synchronized& synchronized, Args&&... args) {
+  return detail::makeSynchronizedLocker(
+      synchronized,
+      [](auto& s, auto&&... a) {
+        return s.wlock(std::forward<decltype(a)>(a)...);
+      },
+      [](auto& s) { return s.tryWLock(); },
+      std::forward<Args>(args)...);
+}
+template <typename Synchronized, typename... Args>
+auto rlock(Synchronized& synchronized, Args&&... args) {
+  return detail::makeSynchronizedLocker(
+      synchronized,
+      [](auto& s, auto&&... a) {
+        return s.rlock(std::forward<decltype(a)>(a)...);
+      },
+      [](auto& s) { return s.tryRLock(); },
+      std::forward<Args>(args)...);
+}
+template <typename Synchronized, typename... Args>
+auto ulock(Synchronized& synchronized, Args&&... args) {
+  return detail::makeSynchronizedLocker(
+      synchronized,
+      [](auto& s, auto&&... a) {
+        return s.ulock(std::forward<decltype(a)>(a)...);
+      },
+      [](auto& s) { return s.tryULock(); },
+      std::forward<Args>(args)...);
+}
+template <typename Synchronized, typename... Args>
+auto lock(Synchronized& synchronized, Args&&... args) {
+  return detail::makeSynchronizedLocker(
+      synchronized,
+      [](auto& s, auto&&... a) {
+        return s.lock(std::forward<decltype(a)>(a)...);
+      },
+      [](auto& s) { return s.tryLock(); },
+      std::forward<Args>(args)...);
 }
 
 } // namespace detail
@@ -1094,7 +1086,7 @@ class LockedPtrBase {
     }
   }
   LockedPtrBase(LockedPtrBase&& rhs) noexcept
-      : parent_{exchange(rhs.parent_, nullptr)} {}
+      : parent_{std::exchange(rhs.parent_, nullptr)} {}
   LockedPtrBase& operator=(LockedPtrBase&& rhs) noexcept {
     assignImpl(*this, rhs);
     return *this;
@@ -1115,7 +1107,7 @@ class LockedPtrBase {
   template <typename LockPolicyType>
   LockedPtrBase(
       LockedPtrBase<SynchronizedType, Mutex, LockPolicyType>&& rhs) noexcept
-      : parent_{exchange(rhs.parent_, nullptr)} {}
+      : parent_{std::exchange(rhs.parent_, nullptr)} {}
   template <typename LockPolicyType>
   LockedPtrBase& operator=(
       LockedPtrBase<SynchronizedType, Mutex, LockPolicyType>&& rhs) noexcept {
@@ -1134,7 +1126,7 @@ class LockedPtrBase {
       LockPolicy::unlock(lhs.parent_->mutex_);
     }
 
-    lhs.parent_ = exchange(rhs.parent_, nullptr);
+    lhs.parent_ = std::exchange(rhs.parent_, nullptr);
   }
 
   using UnlockerData = SynchronizedType*;
@@ -1196,7 +1188,8 @@ class LockedPtrBase<SynchronizedType, std::mutex, LockPolicy> {
   }
 
   LockedPtrBase(LockedPtrBase&& rhs) noexcept
-      : lock_{std::move(rhs.lock_)}, parent_{exchange(rhs.parent_, nullptr)} {}
+      : lock_{std::move(rhs.lock_)},
+        parent_{std::exchange(rhs.parent_, nullptr)} {}
   LockedPtrBase& operator=(LockedPtrBase&& rhs) noexcept {
     assignImpl(*this, rhs);
     return *this;
@@ -1212,7 +1205,7 @@ class LockedPtrBase<SynchronizedType, std::mutex, LockPolicy> {
   LockedPtrBase(LockedPtrBase<SynchronizedType, std::mutex, LockPolicyType>&&
                     other) noexcept
       : lock_{std::move(other.lock_)},
-        parent_{exchange(other.parent_, nullptr)} {}
+        parent_{std::exchange(other.parent_, nullptr)} {}
   template <typename LockPolicyType>
   LockedPtrBase& operator=(
       LockedPtrBase<SynchronizedType, std::mutex, LockPolicyType>&&
@@ -1230,7 +1223,7 @@ class LockedPtrBase<SynchronizedType, std::mutex, LockPolicy> {
       LockedPtrBase<SynchronizedType, std::mutex, LockPolicyRhs>&
           rhs) noexcept {
     lhs.lock_ = std::move(rhs.lock_);
-    lhs.parent_ = exchange(rhs.parent_, nullptr);
+    lhs.parent_ = std::exchange(rhs.parent_, nullptr);
   }
 
   /**
@@ -1309,7 +1302,8 @@ class ScopedUnlocker {
   ScopedUnlocker(const ScopedUnlocker&) = delete;
   ScopedUnlocker& operator=(const ScopedUnlocker&) = delete;
   ScopedUnlocker(ScopedUnlocker&& other) noexcept
-      : ptr_(exchange(other.ptr_, nullptr)), data_(std::move(other.data_)) {}
+      : ptr_(std::exchange(other.ptr_, nullptr)),
+        data_(std::move(other.data_)) {}
   ScopedUnlocker& operator=(ScopedUnlocker&& other) = delete;
 
   ~ScopedUnlocker() {
@@ -1351,9 +1345,18 @@ class LockedPtr : public LockedPtrBase<
       SynchronizedType,
       typename SynchronizedType::MutexType,
       LockPolicy>;
+  constexpr static bool AllowsConcurrentAccess =
+      LockPolicy::allows_concurrent_access;
   using UnlockerData = typename Base::UnlockerData;
   // CDataType is the DataType with the appropriate const-qualification
-  using CDataType = detail::SynchronizedDataType<SynchronizedType>;
+  using CDataType =
+      detail::SynchronizedDataType<SynchronizedType, AllowsConcurrentAccess>;
+  // Enable only if the unlock policy of the other LockPolicy is the same as
+  // ours
+  template <typename LockPolicyOther>
+  using EnableIfSameUnlockPolicy = std::enable_if_t<std::is_same<
+      typename LockPolicy::UnlockPolicy,
+      typename LockPolicyOther::UnlockPolicy>::value>;
 
   // friend other LockedPtr types
   template <typename SynchronizedTypeOther, typename LockPolicyOther>
@@ -1395,19 +1398,19 @@ class LockedPtr : public LockedPtrBase<
    * Move constructor.
    */
   LockedPtr(LockedPtr&& rhs) noexcept = default;
+  template <
+      typename LockPolicyType,
+      EnableIfSameUnlockPolicy<LockPolicyType>* = nullptr>
+  LockedPtr(LockedPtr<SynchronizedType, LockPolicyType>&& other) noexcept
+      : Base{std::move(other)} {}
 
   /**
    * Move assignment operator.
    */
   LockedPtr& operator=(LockedPtr&& rhs) noexcept = default;
-
   template <
       typename LockPolicyType,
-      typename std::enable_if<
-          std::is_same<
-              typename LockPolicy::UnlockPolicy,
-              typename LockPolicyType::UnlockPolicy>::value,
-          int>::type = 0>
+      EnableIfSameUnlockPolicy<LockPolicyType>* = nullptr>
   LockedPtr& operator=(
       LockedPtr<SynchronizedType, LockPolicyType>&& other) noexcept {
     Base::operator=(std::move(other));
@@ -1467,6 +1470,34 @@ class LockedPtr : public LockedPtrBase<
   }
 
   /**
+   * Locks that allow concurrent access (shared, upgrade) force const
+   * access with the standard accessors even if the Synchronized
+   * object is non-const.
+   *
+   * In some cases non-const access can be needed, for example:
+   *
+   *   - Under an upgrade lock, to get references that will be mutated
+   *     after upgrading to a write lock.
+   *
+   *   - Under an read lock, if some mutating operations on the data
+   *     are thread safe (e.g. mutating the value in an associative
+   *     container with reference stability).
+   *
+   * asNonConstUnsafe() returns a non-const reference to the data if
+   * the parent Synchronized object was non-const at the point of lock
+   * acquisition.
+   */
+  template <typename = void>
+  DataType& asNonConstUnsafe() const {
+    static_assert(
+        AllowsConcurrentAccess && !std::is_const<SynchronizedType>::value,
+        "asNonConstUnsafe() is only available on non-exclusive locks"
+        " acquired in a non-const context");
+
+    return this->parent_->datum_;
+  }
+
+  /**
    * Temporarily unlock the LockedPtr, and reset it to null.
    *
    * Returns an helper object that will re-lock and restore the LockedPtr when
@@ -1478,8 +1509,8 @@ class LockedPtr : public LockedPtrBase<
   }
 
   /***************************************************************************
-   * Upgradable lock methods.
-   * These are disabled via SFINAE when the mutex is not upgradable
+   * Upgrade lock methods.
+   * These are disabled via SFINAE when the mutex is not an upgrade mutex.
    **************************************************************************/
   /**
    * Move the locked ptr from an upgrade state to an exclusive state.  The
@@ -1492,7 +1523,7 @@ class LockedPtr : public LockedPtrBase<
   LockedPtr<SynchronizedType, LockPolicyFromUpgradeToExclusive>
   moveFromUpgradeToWrite() {
     return LockedPtr<SynchronizedType, LockPolicyFromUpgradeToExclusive>(
-        exchange(this->parent_, nullptr));
+        std::exchange(this->parent_, nullptr));
   }
 
   /**
@@ -1506,7 +1537,7 @@ class LockedPtr : public LockedPtrBase<
   LockedPtr<SynchronizedType, LockPolicyFromExclusiveToUpgrade>
   moveFromWriteToUpgrade() {
     return LockedPtr<SynchronizedType, LockPolicyFromExclusiveToUpgrade>(
-        exchange(this->parent_, nullptr));
+        std::exchange(this->parent_, nullptr));
   }
 
   /**
@@ -1520,7 +1551,7 @@ class LockedPtr : public LockedPtrBase<
   LockedPtr<SynchronizedType, LockPolicyFromUpgradeToShared>
   moveFromUpgradeToRead() {
     return LockedPtr<SynchronizedType, LockPolicyFromUpgradeToShared>(
-        exchange(this->parent_, nullptr));
+        std::exchange(this->parent_, nullptr));
   }
 
   /**
@@ -1534,65 +1565,83 @@ class LockedPtr : public LockedPtrBase<
   LockedPtr<SynchronizedType, LockPolicyFromExclusiveToShared>
   moveFromWriteToRead() {
     return LockedPtr<SynchronizedType, LockPolicyFromExclusiveToShared>(
-        exchange(this->parent_, nullptr));
+        std::exchange(this->parent_, nullptr));
   }
 };
 
 /**
- * LockedGuardPtr is a simplified version of LockedPtr.
+ * Helper functions that should be passed to either a lock() or synchronized()
+ * invocation, these return implementation defined structs that will be used
+ * to lock the synchronized instance appropriately.
  *
- * It is non-movable, and supports fewer features than LockedPtr.  However, it
- * is ever-so-slightly more performant than LockedPtr.  (The destructor can
- * unconditionally release the lock, without requiring a conditional branch.)
+ *    lock(wlock(one), rlock(two), wlock(three));
+ *    synchronized([](auto one, two) { ... }, wlock(one), rlock(two));
  *
- * The relationship between LockedGuardPtr and LockedPtr is similar to that
- * between std::lock_guard and std::unique_lock.
+ * For example in the above rlock() produces an implementation defined read
+ * locking helper instance and wlock() a write locking helper
+ *
+ * Subsequent arguments passed to these locking helpers, after the first, will
+ * be passed by const-ref to the corresponding function on the synchronized
+ * instance.  This means that if the function accepts these parameters by
+ * value, they will be copied.  Note that it is not necessary that the primary
+ * locking function will be invoked at all (for eg.  the implementation might
+ * just invoke the try*Lock() method)
+ *
+ *    // Try to acquire the lock for one second
+ *    synchronized([](auto) { ... }, wlock(one, 1s));
+ *
+ *    // The timed lock acquire might never actually be called, if it is not
+ *    // needed by the underlying deadlock avoiding algorithm
+ *    synchronized([](auto, auto) { ... }, rlock(one), wlock(two, 1s));
+ *
+ * Note that the arguments passed to to *lock() calls will be passed by
+ * const-ref to the function invocation, as the implementation might use them
+ * many times
  */
-template <class SynchronizedType, class LockPolicy>
-class LockedGuardPtr {
- private:
-  // CDataType is the DataType with the appropriate const-qualification
-  using CDataType = detail::SynchronizedDataType<SynchronizedType>;
+template <typename D, typename M, typename... Args>
+auto wlock(Synchronized<D, M>& synchronized, Args&&... args) {
+  return detail::wlock(synchronized, std::forward<Args>(args)...);
+}
+template <typename D, typename M, typename... Args>
+auto wlock(const Synchronized<D, M>& synchronized, Args&&... args) {
+  return detail::wlock(synchronized, std::forward<Args>(args)...);
+}
+template <typename Data, typename Mutex, typename... Args>
+auto rlock(const Synchronized<Data, Mutex>& synchronized, Args&&... args) {
+  return detail::rlock(synchronized, std::forward<Args>(args)...);
+}
+template <typename D, typename M, typename... Args>
+auto ulock(Synchronized<D, M>& synchronized, Args&&... args) {
+  return detail::ulock(synchronized, std::forward<Args>(args)...);
+}
+template <typename D, typename M, typename... Args>
+auto lock(Synchronized<D, M>& synchronized, Args&&... args) {
+  return detail::lock(synchronized, std::forward<Args>(args)...);
+}
+template <typename D, typename M, typename... Args>
+auto lock(const Synchronized<D, M>& synchronized, Args&&... args) {
+  return detail::lock(synchronized, std::forward<Args>(args)...);
+}
 
- public:
-  using DataType = typename SynchronizedType::DataType;
-  using MutexType = typename SynchronizedType::MutexType;
-  using Synchronized = typename std::remove_const<SynchronizedType>::type;
-
-  LockedGuardPtr() = delete;
-
-  /**
-   * Takes a Synchronized<T> and locks it.
-   */
-  explicit LockedGuardPtr(SynchronizedType* parent) : parent_(parent) {
-    LockPolicy::lock(parent_->mutex_);
-  }
-
-  /**
-   * Destructor releases.
-   */
-  ~LockedGuardPtr() {
-    LockPolicy::unlock(parent_->mutex_);
-  }
-
-  /**
-   * Access the locked data.
-   */
-  CDataType* operator->() const {
-    return &parent_->datum_;
-  }
-
-  /**
-   * Access the locked data.
-   */
-  CDataType& operator*() const {
-    return parent_->datum_;
-  }
-
- private:
-  // This is the entire state of LockedGuardPtr.
-  SynchronizedType* const parent_{nullptr};
-};
+/**
+ * Acquire locks for multiple Synchronized<> objects, in a deadlock-safe
+ * manner.
+ *
+ * Wrap the synchronized instances with the appropriate locking strategy by
+ * using one of the four strategies - folly::lock (exclusive acquire for
+ * exclusive only mutexes), folly::rlock (shared acquire for shareable
+ * mutexes), folly::wlock (exclusive acquire for shareable mutexes) or
+ * folly::ulock (upgrade acquire for upgrade mutexes) (see above)
+ *
+ * The locks will be acquired and the passed callable will be invoked with the
+ * LockedPtr instances in the order that they were passed to the function
+ */
+template <typename Func, typename... SynchronizedLockers>
+decltype(auto) synchronized(Func&& func, SynchronizedLockers&&... lockers) {
+  return apply(
+      std::forward<Func>(func),
+      lock(std::forward<SynchronizedLockers>(lockers)...));
+}
 
 /**
  * Acquire locks on many lockables or synchronized instances in such a way
@@ -1628,41 +1677,22 @@ class LockedGuardPtr {
  */
 template <typename LockableOne, typename LockableTwo, typename... Lockables>
 void lock(LockableOne& one, LockableTwo& two, Lockables&... lockables) {
-  auto locks = lock(
-      detail::LockableLocker<LockableOne>{one},
-      detail::LockableLocker<LockableTwo>{two},
-      detail::LockableLocker<Lockables>{lockables}...);
+  auto locker = [](auto& lockable) {
+    using Lockable = std::remove_reference_t<decltype(lockable)>;
+    return detail::makeSynchronizedLocker(
+        lockable,
+        [](auto& l) { return std::unique_lock<Lockable>{l}; },
+        [](auto& l) {
+          auto lock = std::unique_lock<Lockable>{l, std::defer_lock};
+          lock.try_lock();
+          return lock;
+        });
+  };
+  auto locks = lock(locker(one), locker(two), locker(lockables)...);
 
   // release ownership of the locks from the RAII lock wrapper returned by the
   // function above
-  folly::for_each(locks, [&](auto& lock) { lock.release(); });
-}
-
-/**
- * Helper functions that should be passed to a lock() invocation, these return
- * implementation defined structs that lock() will use to lock the
- * synchronized instance appropriately.
- *
- *    lock(folly::wlock(one), folly::rlock(two), folly::wlock(three));
- *
- * For example in the above rlock() produces an implementation defined read
- * locking helper instance and wlock() a write locking helper
- */
-template <typename Data, typename Mutex>
-auto wlock(Synchronized<Data, Mutex>& synchronized) {
-  return detail::SynchronizedWLocker<Synchronized<Data, Mutex>>{synchronized};
-}
-template <typename Data, typename Mutex>
-auto rlock(Synchronized<Data, Mutex>& synchronized) {
-  return detail::SynchronizedRLocker<Synchronized<Data, Mutex>>{synchronized};
-}
-template <typename Data, typename Mutex>
-auto ulock(Synchronized<Data, Mutex>& synchronized) {
-  return detail::SynchronizedULocker<Synchronized<Data, Mutex>>{synchronized};
-}
-template <typename Data, typename Mutex>
-auto lock(Synchronized<Data, Mutex>& synchronized) {
-  return detail::SynchronizedLocker<Synchronized<Data, Mutex>>{synchronized};
+  for_each(locks, [&](auto& lock) { lock.release(); });
 }
 
 /**
@@ -1742,7 +1772,7 @@ void swap(Synchronized<T, M>& lhs, Synchronized<T, M>& rhs) {
  */
 #define SYNCHRONIZED(...)                                             \
   FOLLY_PUSH_WARNING                                                  \
-  FOLLY_GCC_DISABLE_WARNING("-Wshadow")                               \
+  FOLLY_GNU_DISABLE_WARNING("-Wshadow")                               \
   FOLLY_MSVC_DISABLE_WARNING(4189) /* initialized but unreferenced */ \
   FOLLY_MSVC_DISABLE_WARNING(4456) /* declaration hides local */      \
   FOLLY_MSVC_DISABLE_WARNING(4457) /* declaration hides parameter */  \
@@ -1759,7 +1789,7 @@ void swap(Synchronized<T, M>& lhs, Synchronized<T, M>& rhs) {
                *SYNCHRONIZED_VAR(lockedPtr).operator->();             \
            !SYNCHRONIZED_VAR(state);                                  \
            SYNCHRONIZED_VAR(state) = true)                            \
-  FOLLY_POP_WARNING
+    FOLLY_POP_WARNING
 
 #define TIMED_SYNCHRONIZED(timeout, ...)                                       \
   if (bool SYNCHRONIZED_VAR(state) = false) {                                  \
@@ -1781,7 +1811,7 @@ void swap(Synchronized<T, M>& lhs, Synchronized<T, M>& rhs) {
 #define SYNCHRONIZED_CONST(...)            \
   SYNCHRONIZED(                            \
       FB_VA_GLUE(FB_ARG_1, (__VA_ARGS__)), \
-      (FB_VA_GLUE(FB_ARG_2_OR_1, (__VA_ARGS__))).asConst())
+      as_const(FB_VA_GLUE(FB_ARG_2_OR_1, (__VA_ARGS__))))
 
 /**
  * Similar to TIMED_SYNCHRONIZED, but only uses a read lock.
@@ -1790,7 +1820,7 @@ void swap(Synchronized<T, M>& lhs, Synchronized<T, M>& rhs) {
   TIMED_SYNCHRONIZED(                          \
       timeout,                                 \
       FB_VA_GLUE(FB_ARG_1, (__VA_ARGS__)),     \
-      (FB_VA_GLUE(FB_ARG_2_OR_1, (__VA_ARGS__))).asConst())
+      as_const(FB_VA_GLUE(FB_ARG_2_OR_1, (__VA_ARGS__))))
 
 /**
  * Synchronizes two Synchronized objects (they may encapsulate

@@ -21,53 +21,16 @@
 
 #include <folly/Portability.h>
 #include <folly/Try.h>
+#include <folly/functional/Invoke.h>
 #include <folly/futures/Future.h>
+#include <folly/futures/Portability.h>
 #include <folly/futures/Promise.h>
 
 namespace folly {
 
-namespace futures {
-namespace detail {
-template <typename... Ts>
-struct CollectAllVariadicContext {
-  CollectAllVariadicContext() {}
-  template <typename T, size_t I>
-  inline void setPartialResult(Try<T>& t) {
-    std::get<I>(results) = std::move(t);
-  }
-  ~CollectAllVariadicContext() {
-    p.setValue(std::move(results));
-  }
-  Promise<std::tuple<Try<Ts>...>> p;
-  std::tuple<Try<Ts>...> results;
-  typedef Future<std::tuple<Try<Ts>...>> type;
-};
-
-template <typename... Ts>
-struct CollectVariadicContext {
-  CollectVariadicContext() {}
-  template <typename T, size_t I>
-  inline void setPartialResult(Try<T>& t) {
-    if (t.hasException()) {
-      if (!threw.exchange(true)) {
-        p.setException(std::move(t.exception()));
-      }
-    } else if (!threw) {
-      std::get<I>(results) = std::move(t);
-    }
-  }
-  ~CollectVariadicContext() noexcept {
-    if (!threw.exchange(true)) {
-      p.setValue(unwrapTryTuple(std::move(results)));
-    }
-  }
-  Promise<std::tuple<Ts...>> p;
-  std::tuple<folly::Try<Ts>...> results;
-  std::atomic<bool> threw{false};
-  typedef Future<std::tuple<Ts...>> type;
-};
-} // namespace detail
-} // namespace futures
+namespace fibers {
+class Baton;
+}
 
 /// This namespace is for utility functions that would usually be static
 /// members of Future, except they don't make sense there because they don't
@@ -76,37 +39,127 @@ struct CollectVariadicContext {
 /// of the functions herein have really-likely-to-collide names, like "map"
 /// and "sleep".
 namespace futures {
-  /// Returns a Future that will complete after the specified duration. The
-  /// Duration typedef of a `std::chrono` duration type indicates the
-  /// resolution you can expect to be meaningful (milliseconds at the time of
-  /// writing). Normally you wouldn't need to specify a Timekeeper, we will
-  /// use the global futures timekeeper (we run a thread whose job it is to
-  /// keep time for futures timeouts) but we provide the option for power
-  /// users.
-  ///
-  /// The Timekeeper thread will be lazily created the first time it is
-  /// needed. If your program never uses any timeouts or other time-based
-  /// Futures you will pay no Timekeeper thread overhead.
-  Future<Unit> sleep(Duration, Timekeeper* = nullptr);
+/// Returns a Future that will complete after the specified duration. The
+/// Duration typedef of a `std::chrono` duration type indicates the
+/// resolution you can expect to be meaningful (milliseconds at the time of
+/// writing). Normally you wouldn't need to specify a Timekeeper, we will
+/// use the global futures timekeeper (we run a thread whose job it is to
+/// keep time for futures timeouts) but we provide the option for power
+/// users.
+///
+/// The Timekeeper thread will be lazily created the first time it is
+/// needed. If your program never uses any timeouts or other time-based
+/// Futures you will pay no Timekeeper thread overhead.
+SemiFuture<Unit> sleep(Duration, Timekeeper* = nullptr);
+[[deprecated(
+    "futures::sleep now returns a SemiFuture<Unit>. "
+    "sleepUnsafe is deprecated. "
+    "Please call futures::sleep and apply an executor with .via")]] Future<Unit>
+sleepUnsafe(Duration, Timekeeper* = nullptr);
 
-  /**
-   * Set func as the callback for each input Future and return a vector of
-   * Futures containing the results in the input order.
-   */
-  template <
-      class It,
-      class F,
-      class ItT = typename std::iterator_traits<It>::value_type,
-      class Result = typename decltype(
-          std::declval<ItT>().then(std::declval<F>()))::value_type>
-  std::vector<Future<Result>> map(It first, It last, F func);
+/**
+ * Set func as the callback for each input Future and return a vector of
+ * Futures containing the results in the input order.
+ */
+template <
+    class It,
+    class F,
+    class ItT = typename std::iterator_traits<It>::value_type,
+    class Tag =
+        std::enable_if_t<is_invocable<F, typename ItT::value_type&&>::value>,
+    class Result = typename decltype(
+        std::declval<ItT>().thenValue(std::declval<F>()))::value_type>
+std::vector<Future<Result>> mapValue(It first, It last, F func);
 
-  // Sugar for the most common case
-  template <class Collection, class F>
-  auto map(Collection&& c, F&& func)
-      -> decltype(map(c.begin(), c.end(), func)) {
-    return map(c.begin(), c.end(), std::forward<F>(func));
-  }
+/**
+ * Set func as the callback for each input Future and return a vector of
+ * Futures containing the results in the input order.
+ */
+template <
+    class It,
+    class F,
+    class ItT = typename std::iterator_traits<It>::value_type,
+    class Tag =
+        std::enable_if_t<!is_invocable<F, typename ItT::value_type&&>::value>,
+    class Result = typename decltype(
+        std::declval<ItT>().thenTry(std::declval<F>()))::value_type>
+std::vector<Future<Result>> mapTry(It first, It last, F func, int = 0);
+
+/**
+ * Set func as the callback for each input Future and return a vector of
+ * Futures containing the results in the input order and completing on
+ * exec.
+ */
+template <
+    class It,
+    class F,
+    class ItT = typename std::iterator_traits<It>::value_type,
+    class Tag =
+        std::enable_if_t<is_invocable<F, typename ItT::value_type&&>::value>,
+    class Result =
+        typename decltype(std::move(std::declval<ItT>())
+                              .via(std::declval<Executor*>())
+                              .thenValue(std::declval<F>()))::value_type>
+std::vector<Future<Result>> mapValue(Executor& exec, It first, It last, F func);
+
+/**
+ * Set func as the callback for each input Future and return a vector of
+ * Futures containing the results in the input order and completing on
+ * exec.
+ */
+template <
+    class It,
+    class F,
+    class ItT = typename std::iterator_traits<It>::value_type,
+    class Tag =
+        std::enable_if_t<!is_invocable<F, typename ItT::value_type&&>::value>,
+    class Result =
+        typename decltype(std::move(std::declval<ItT>())
+                              .via(std::declval<Executor*>())
+                              .thenTry(std::declval<F>()))::value_type>
+std::vector<Future<Result>>
+mapTry(Executor& exec, It first, It last, F func, int = 0);
+
+// Sugar for the most common case
+template <class Collection, class F>
+auto mapValue(Collection&& c, F&& func)
+    -> decltype(mapValue(c.begin(), c.end(), func)) {
+  return mapValue(c.begin(), c.end(), std::forward<F>(func));
+}
+
+template <class Collection, class F>
+auto mapTry(Collection&& c, F&& func)
+    -> decltype(mapTry(c.begin(), c.end(), func)) {
+  return mapTry(c.begin(), c.end(), std::forward<F>(func));
+}
+
+// Sugar for the most common case
+template <class Collection, class F>
+auto mapValue(Executor& exec, Collection&& c, F&& func)
+    -> decltype(mapValue(exec, c.begin(), c.end(), func)) {
+  return mapValue(exec, c.begin(), c.end(), std::forward<F>(func));
+}
+
+template <class Collection, class F>
+auto mapTry(Executor& exec, Collection&& c, F&& func)
+    -> decltype(mapTry(exec, c.begin(), c.end(), func)) {
+  return mapTry(exec, c.begin(), c.end(), std::forward<F>(func));
+}
+
+#if FOLLY_FUTURE_USING_FIBER
+
+SemiFuture<Unit> wait(std::unique_ptr<fibers::Baton> baton);
+
+#endif
+
+/**
+ * Returns a lazy SemiFuture constructed by f, which also ensures that ensure is
+ * called before completion.
+ * f doesn't get called until the SemiFuture is activated (e.g. through a .get()
+ * or .via() call). If f gets called, ensure is guaranteed to be called as well.
+ */
+template <typename F, class Ensure>
+auto ensure(F&& f, Ensure&& ensure);
 
 } // namespace futures
 
@@ -142,16 +195,17 @@ SemiFuture<Unit> makeSemiFuture();
 
 // makeSemiFutureWith(SemiFuture<T>()) -> SemiFuture<T>
 template <class F>
-typename std::enable_if<isSemiFuture<typename std::result_of<F()>::type>::value,
-                        typename std::result_of<F()>::type>::type
+typename std::enable_if<
+    isFutureOrSemiFuture<invoke_result_t<F>>::value,
+    SemiFuture<typename invoke_result_t<F>::value_type>>::type
 makeSemiFutureWith(F&& func);
 
 // makeSemiFutureWith(T()) -> SemiFuture<T>
 // makeSemiFutureWith(void()) -> SemiFuture<Unit>
 template <class F>
 typename std::enable_if<
-    !(isSemiFuture<typename std::result_of<F()>::type>::value),
-    SemiFuture<typename Unit::Lift<typename std::result_of<F()>::type>::type>>::type
+    !(isFutureOrSemiFuture<invoke_result_t<F>>::value),
+    SemiFuture<lift_unit_t<invoke_result_t<F>>>>::type
 makeSemiFutureWith(F&& func);
 
 /// Make a failed Future from an exception_ptr.
@@ -159,8 +213,8 @@ makeSemiFutureWith(F&& func);
 ///
 ///   auto f = makeSemiFuture<string>(std::current_exception());
 template <class T>
-[[deprecated("use makeSemiFuture(exception_wrapper)")]]
-SemiFuture<T> makeSemiFuture(std::exception_ptr const& e);
+[[deprecated("use makeSemiFuture(exception_wrapper)")]] SemiFuture<T>
+makeSemiFuture(std::exception_ptr const& e);
 
 /// Make a failed SemiFuture from an exception_wrapper.
 template <class T>
@@ -169,13 +223,13 @@ SemiFuture<T> makeSemiFuture(exception_wrapper ew);
 /** Make a SemiFuture from an exception type E that can be passed to
   std::make_exception_ptr(). */
 template <class T, class E>
-typename std::enable_if<std::is_base_of<std::exception, E>::value,
-                        SemiFuture<T>>::type
-makeSemiFuture(E const& e);
+typename std::
+    enable_if<std::is_base_of<std::exception, E>::value, SemiFuture<T>>::type
+    makeSemiFuture(E const& e);
 
 /** Make a Future out of a Try */
 template <class T>
-SemiFuture<T> makeSemiFuture(Try<T>&& t);
+SemiFuture<T> makeSemiFuture(Try<T> t);
 
 /**
   Make a completed Future by moving in a value. e.g.
@@ -226,16 +280,16 @@ Future<Unit> makeFuture();
 
 // makeFutureWith(Future<T>()) -> Future<T>
 template <class F>
-typename std::enable_if<isFuture<typename std::result_of<F()>::type>::value,
-                        typename std::result_of<F()>::type>::type
-makeFutureWith(F&& func);
+typename std::
+    enable_if<isFuture<invoke_result_t<F>>::value, invoke_result_t<F>>::type
+    makeFutureWith(F&& func);
 
 // makeFutureWith(T()) -> Future<T>
 // makeFutureWith(void()) -> Future<Unit>
 template <class F>
 typename std::enable_if<
-    !(isFuture<typename std::result_of<F()>::type>::value),
-    Future<typename Unit::Lift<typename std::result_of<F()>::type>::type>>::type
+    !(isFuture<invoke_result_t<F>>::value),
+    Future<lift_unit_t<invoke_result_t<F>>>>::type
 makeFutureWith(F&& func);
 
 /// Make a failed Future from an exception_ptr.
@@ -243,8 +297,8 @@ makeFutureWith(F&& func);
 ///
 ///   auto f = makeFuture<string>(std::current_exception());
 template <class T>
-[[deprecated("use makeSemiFuture(exception_wrapper)")]]
-Future<T> makeFuture(std::exception_ptr const& e);
+[[deprecated("use makeSemiFuture(exception_wrapper)")]] Future<T> makeFuture(
+    std::exception_ptr const& e);
 
 /// Make a failed Future from an exception_wrapper.
 /// NOTE: This function is deprecated. Please use makeSemiFuture and pass the
@@ -261,9 +315,9 @@ Future<T> makeFuture(exception_wrapper ew);
        valid Future where necessary.
  */
 template <class T, class E>
-typename std::enable_if<std::is_base_of<std::exception, E>::value,
-                        Future<T>>::type
-makeFuture(E const& e);
+typename std::enable_if<std::is_base_of<std::exception, E>::value, Future<T>>::
+    type
+    makeFuture(E const& e);
 
 /**
   Make a Future out of a Try
@@ -273,7 +327,7 @@ makeFuture(E const& e);
        valid Future where necessary.
  */
 template <class T>
-Future<T> makeFuture(Try<T>&& t);
+Future<T> makeFuture(Try<T> t);
 
 /*
  * Return a new Future that will call back on the given Executor.
@@ -285,16 +339,15 @@ Future<T> makeFuture(Try<T>&& t);
  *
  * @returns a void Future that will call back on the given executor
  */
-inline Future<Unit> via(
-    Executor* executor,
-    int8_t priority = Executor::MID_PRI);
+inline Future<Unit> via(Executor::KeepAlive<> executor);
+inline Future<Unit> via(Executor::KeepAlive<> executor, int8_t priority);
 
 /// Execute a function via the given executor and return a future.
 /// This is semantically equivalent to via(executor).then(func), but
 /// easier to read and slightly more efficient.
 template <class Func>
-auto via(Executor*, Func&& func)
-    -> Future<typename isFuture<decltype(std::declval<Func>()())>::Inner>;
+auto via(Executor::KeepAlive<>, Func&& func) -> Future<
+    typename isFutureOrSemiFuture<decltype(std::declval<Func>()())>::Inner>;
 
 /** When all the input Futures complete, the returned Future will complete.
   Errors do not cause early termination; this Future will always succeed
@@ -312,11 +365,22 @@ auto via(Executor*, Func&& func)
   The return type for Future<T> input is a Future<std::vector<Try<T>>>
   */
 template <class InputIterator>
-Future<std::vector<Try<
-  typename std::iterator_traits<InputIterator>::value_type::value_type>>>
-collectAll(InputIterator first, InputIterator last);
+SemiFuture<std::vector<
+    Try<typename std::iterator_traits<InputIterator>::value_type::value_type>>>
+collectAllSemiFuture(InputIterator first, InputIterator last);
 
 /// Sugar for the most common case
+template <class Collection>
+auto collectAllSemiFuture(Collection&& c)
+    -> decltype(collectAllSemiFuture(c.begin(), c.end())) {
+  return collectAllSemiFuture(c.begin(), c.end());
+}
+
+template <class InputIterator>
+Future<std::vector<
+    Try<typename std::iterator_traits<InputIterator>::value_type::value_type>>>
+collectAll(InputIterator first, InputIterator last);
+
 template <class Collection>
 auto collectAll(Collection&& c) -> decltype(collectAll(c.begin(), c.end())) {
   return collectAll(c.begin(), c.end());
@@ -327,16 +391,18 @@ auto collectAll(Collection&& c) -> decltype(collectAll(c.begin(), c.end())) {
 /// is a Future<std::tuple<Try<T1>, Try<T2>, ...>>.
 /// The Futures are moved in, so your copies are invalid.
 template <typename... Fs>
-typename futures::detail::CollectAllVariadicContext<
-    typename std::decay<Fs>::type::value_type...>::type
-collectAll(Fs&&... fs);
+SemiFuture<std::tuple<Try<typename remove_cvref_t<Fs>::value_type>...>>
+collectAllSemiFuture(Fs&&... fs);
 
+template <typename... Fs>
+Future<std::tuple<Try<typename remove_cvref_t<Fs>::value_type>...>> collectAll(
+    Fs&&... fs);
 /// Like collectAll, but will short circuit on the first exception. Thus, the
 /// type of the returned Future is std::vector<T> instead of
 /// std::vector<Try<T>>
 template <class InputIterator>
-Future<typename futures::detail::CollectContext<typename std::iterator_traits<
-    InputIterator>::value_type::value_type>::result_type>
+Future<std::vector<
+    typename std::iterator_traits<InputIterator>::value_type::value_type>>
 collect(InputIterator first, InputIterator last);
 
 /// Sugar for the most common case
@@ -349,9 +415,8 @@ auto collect(Collection&& c) -> decltype(collect(c.begin(), c.end())) {
 /// type of the returned Future is std::tuple<T1, T2, ...> instead of
 /// std::tuple<Try<T1>, Try<T2>, ...>
 template <typename... Fs>
-typename futures::detail::CollectVariadicContext<
-    typename std::decay<Fs>::type::value_type...>::type
-collect(Fs&&... fs);
+Future<std::tuple<typename remove_cvref_t<Fs>::value_type...>> collect(
+    Fs&&... fs);
 
 /** The result is a pair of the index of the first Future to complete and
   the Try. If multiple Futures complete at the same time (or are already
@@ -361,9 +426,14 @@ collect(Fs&&... fs);
   */
 template <class InputIterator>
 Future<std::pair<
-  size_t,
-  Try<typename std::iterator_traits<InputIterator>::value_type::value_type>>>
+    size_t,
+    Try<typename std::iterator_traits<InputIterator>::value_type::value_type>>>
 collectAny(InputIterator first, InputIterator last);
+template <class InputIterator>
+SemiFuture<std::pair<
+    size_t,
+    Try<typename std::iterator_traits<InputIterator>::value_type::value_type>>>
+collectAnySemiFuture(InputIterator first, InputIterator last);
 
 /// Sugar for the most common case
 template <class Collection>
@@ -374,9 +444,9 @@ auto collectAny(Collection&& c) -> decltype(collectAny(c.begin(), c.end())) {
 /** Similar to collectAny, collectAnyWithoutException return the first Future to
  * complete without exceptions. If none of the future complete without
  * excpetions, the last exception will be returned as a result.
-  */
+ */
 template <class InputIterator>
-Future<std::pair<
+SemiFuture<std::pair<
     size_t,
     typename std::iterator_traits<InputIterator>::value_type::value_type>>
 collectAnyWithoutException(InputIterator first, InputIterator last);
@@ -395,9 +465,9 @@ auto collectAnyWithoutException(Collection&& c)
   Not thread safe.
   */
 template <class InputIterator>
-Future<std::vector<std::pair<
-  size_t,
-  Try<typename std::iterator_traits<InputIterator>::value_type::value_type>>>>
+SemiFuture<std::vector<std::pair<
+    size_t,
+    Try<typename std::iterator_traits<InputIterator>::value_type::value_type>>>>
 collectN(InputIterator first, InputIterator last, size_t n);
 
 /// Sugar for the most common case
@@ -420,7 +490,7 @@ template <
     class F,
     class ItT = typename std::iterator_traits<
         typename Collection::iterator>::value_type,
-    class Result = typename futures::detail::resultOf<F, ItT&&>::value_type>
+    class Result = typename invoke_result_t<F, ItT&&>::value_type>
 std::vector<Future<Result>> window(Collection input, F func, size_t n);
 
 template <
@@ -428,18 +498,13 @@ template <
     class F,
     class ItT = typename std::iterator_traits<
         typename Collection::iterator>::value_type,
-    class Result = typename futures::detail::resultOf<F, ItT&&>::value_type>
+    class Result = typename invoke_result_t<F, ItT&&>::value_type>
 std::vector<Future<Result>>
-window(Executor* executor, Collection input, F func, size_t n);
+window(Executor::KeepAlive<> executor, Collection input, F func, size_t n);
 
 template <typename F, typename T, typename ItT>
-using MaybeTryArg = typename std::conditional<
-    futures::detail::callableWith<F, T&&, Try<ItT>&&>::value,
-    Try<ItT>,
-    ItT>::type;
-
-template <typename F, typename T, typename Arg>
-using isFutureResult = isFuture<typename std::result_of<F(T&&, Arg&&)>::type>;
+using MaybeTryArg = typename std::
+    conditional<is_invocable<F, T&&, Try<ItT>&&>::value, Try<ItT>, ItT>::type;
 
 /** repeatedly calls func on every result, e.g.
     reduce(reduce(reduce(T initial, result of first), result of second), ...)
@@ -456,36 +521,30 @@ Future<T> reduce(It first, It last, T&& initial, F&& func);
 
 /// Sugar for the most common case
 template <class Collection, class T, class F>
-auto reduce(Collection&& c, T&& initial, F&& func)
-    -> decltype(reduce(c.begin(), c.end(), std::forward<T>(initial),
-                std::forward<F>(func))) {
+auto reduce(Collection&& c, T&& initial, F&& func) -> decltype(reduce(
+    c.begin(),
+    c.end(),
+    std::forward<T>(initial),
+    std::forward<F>(func))) {
   return reduce(
-      c.begin(),
-      c.end(),
-      std::forward<T>(initial),
-      std::forward<F>(func));
+      c.begin(), c.end(), std::forward<T>(initial), std::forward<F>(func));
 }
 
 /** like reduce, but calls func on finished futures as they complete
     does NOT keep the order of the input
   */
-template <
-    class It,
-    class T,
-    class F,
-    class ItT = typename std::iterator_traits<It>::value_type::value_type,
-    class Arg = MaybeTryArg<F, T, ItT>>
+template <class It, class T, class F>
 Future<T> unorderedReduce(It first, It last, T initial, F func);
 
 /// Sugar for the most common case
 template <class Collection, class T, class F>
 auto unorderedReduce(Collection&& c, T&& initial, F&& func)
-    -> decltype(unorderedReduce(c.begin(), c.end(), std::forward<T>(initial),
-                std::forward<F>(func))) {
+    -> decltype(unorderedReduce(
+        c.begin(),
+        c.end(),
+        std::forward<T>(initial),
+        std::forward<F>(func))) {
   return unorderedReduce(
-      c.begin(),
-      c.end(),
-      std::forward<T>(initial),
-      std::forward<F>(func));
+      c.begin(), c.end(), std::forward<T>(initial), std::forward<F>(func));
 }
 } // namespace folly

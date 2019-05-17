@@ -20,11 +20,13 @@
 #include <condition_variable>
 #include <thread>
 
+#include <boost/thread/barrier.hpp>
+
 #include <folly/Benchmark.h>
 #include <folly/Range.h>
 #include <folly/portability/GFlags.h>
 
-DEFINE_int32(digest_merge_time_ns, 13000, "Time to merge into the digest");
+DEFINE_int32(digest_merge_time_ns, 5500, "Time to merge into the digest");
 
 using namespace folly;
 using namespace folly::detail;
@@ -46,42 +48,23 @@ unsigned int append(unsigned int iters, size_t bufSize, size_t nThreads) {
   iters = 1000000;
   auto buffer = std::make_shared<DigestBuilder<FreeDigest>>(bufSize, 100);
 
-  std::atomic<size_t> numDone{0};
-
-  std::mutex m;
-  size_t numWaiters = 0;
-  std::condition_variable cv;
+  auto barrier = std::make_shared<boost::barrier>(nThreads + 1);
 
   std::vector<std::thread> threads;
   threads.reserve(nThreads);
   BENCHMARK_SUSPEND {
     for (size_t i = 0; i < nThreads; ++i) {
       threads.emplace_back([&]() {
-        {
-          std::unique_lock<std::mutex> g(m);
-          ++numWaiters;
-          cv.wait(g);
-        }
+        barrier->wait();
         for (size_t iter = 0; iter < iters; ++iter) {
           buffer->append(iter);
         }
-        ++numDone;
+        barrier->wait();
       });
     }
-    while (true) {
-      {
-        std::unique_lock<std::mutex> g(m);
-        if (numWaiters < nThreads) {
-          continue;
-        }
-      }
-      cv.notify_all();
-      break;
-    }
+    barrier->wait();
   }
-
-  while (numDone < nThreads) {
-  }
+  barrier->wait();
 
   BENCHMARK_SUSPEND {
     for (auto& thread : threads) {
@@ -110,19 +93,19 @@ BENCHMARK_RELATIVE_NAMED_PARAM_MULTI(append, 10000x32, 10000, 32)
  * ============================================================================
  * folly/stats/test/DigestBuilderBenchmark.cpp     relative  time/iter  iters/s
  * ============================================================================
- * append(1000x1)                                              51.79ns   19.31M
- * append(1000x2)                                    97.04%    53.37ns   18.74M
- * append(1000x4)                                    95.68%    54.12ns   18.48M
- * append(1000x8)                                    91.95%    56.32ns   17.76M
- * append(1000x16)                                   62.12%    83.36ns   12.00M
- * append(1000x32)                                   38.12%   135.85ns    7.36M
+ * append(1000x1)                                              16.32ns   61.26M
+ * append(1000x2)                                    96.42%    16.93ns   59.07M
+ * append(1000x4)                                    93.57%    17.44ns   57.33M
+ * append(1000x8)                                    93.43%    17.47ns   57.24M
+ * append(1000x16)                                   92.96%    17.56ns   56.95M
+ * append(1000x32)                                   29.23%    55.84ns   17.91M
  * ----------------------------------------------------------------------------
- * append(10000x1)                                             46.34ns   21.58M
- * append(10000x2)                                   97.91%    47.33ns   21.13M
- * append(10000x4)                                   95.27%    48.64ns   20.56M
- * append(10000x8)                                   91.39%    50.70ns   19.72M
- * append(10000x16)                                  55.26%    83.85ns   11.93M
- * append(10000x32)                                  35.57%   130.25ns    7.68M
+ * append(10000x1)                                             11.58ns   86.33M
+ * append(10000x2)                                   95.82%    12.09ns   82.72M
+ * append(10000x4)                                   89.00%    13.01ns   76.84M
+ * append(10000x8)                                   88.63%    13.07ns   76.51M
+ * append(10000x16)                                  88.22%    13.13ns   76.16M
+ * append(10000x32)                                  24.89%    46.54ns   21.49M
  * ============================================================================
  */
 

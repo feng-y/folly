@@ -25,68 +25,68 @@
 namespace folly {
 namespace detail {
 
+static FOLLY_TLS uint32_t tls_lastCpuBufferSlot = 0;
+
 template <typename DigestT>
 DigestBuilder<DigestT>::DigestBuilder(size_t bufferSize, size_t digestSize)
-    : nextPos_(0),
-      digestSize_(digestSize),
-      cpuLocalBuffersReady_(false),
-      buffer_(bufferSize) {}
+    : bufferSize_(bufferSize), digestSize_(digestSize) {
+  auto& cl = CacheLocality::system();
+  cpuLocalBuffers_.resize(cl.numCachesByLevel[0]);
+}
 
 template <typename DigestT>
-DigestT DigestBuilder<DigestT>::buildSyncFree() const {
-  std::vector<double> values;
-  std::vector<DigestT> digests;
-  auto numElems =
-      std::min(nextPos_.load(std::memory_order_relaxed), buffer_.size());
-  values.insert(values.end(), buffer_.begin(), buffer_.begin() + numElems);
+DigestT DigestBuilder<DigestT>::build() {
+  std::vector<std::vector<double>> valuesVec;
+  std::vector<std::unique_ptr<DigestT>> digestPtrs;
+  valuesVec.reserve(cpuLocalBuffers_.size());
+  digestPtrs.reserve(cpuLocalBuffers_.size());
 
-  if (cpuLocalBuffersReady_.load(std::memory_order_relaxed)) {
-    for (const auto& cpuLocalBuffer : cpuLocalBuffers_) {
-      if (cpuLocalBuffer.digest) {
-        digests.push_back(*cpuLocalBuffer.digest);
-      }
-      values.insert(
-          values.end(),
-          cpuLocalBuffer.buffer.begin(),
-          cpuLocalBuffer.buffer.end());
+  for (auto& cpuLocalBuffer : cpuLocalBuffers_) {
+    SpinLockGuard g(cpuLocalBuffer.mutex);
+    valuesVec.push_back(std::move(cpuLocalBuffer.buffer));
+    if (cpuLocalBuffer.digest) {
+      digestPtrs.push_back(std::move(cpuLocalBuffer.digest));
     }
   }
-  std::sort(values.begin(), values.end());
-  DigestT digest(digestSize_);
-  digests.push_back(digest.merge(values));
+
+  std::vector<DigestT> digests;
+  for (auto& digestPtr : digestPtrs) {
+    digests.push_back(std::move(*digestPtr));
+  }
+
+  size_t count = 0;
+  for (const auto& vec : valuesVec) {
+    count += vec.size();
+  }
+  if (count) {
+    std::vector<double> values;
+    values.reserve(count);
+    for (const auto& vec : valuesVec) {
+      values.insert(values.end(), vec.begin(), vec.end());
+    }
+    DigestT digest(digestSize_);
+    digests.push_back(digest.merge(values));
+  }
   return DigestT::merge(digests);
 }
 
 template <typename DigestT>
 void DigestBuilder<DigestT>::append(double value) {
-  auto pos = nextPos_.load(std::memory_order_relaxed);
-  if (pos < buffer_.size()) {
-    pos = nextPos_.fetch_add(1, std::memory_order_relaxed);
-    if (pos < buffer_.size()) {
-      buffer_[pos] = value;
-      if (pos == buffer_.size() - 1) {
-        // The shared buffer is full. From here on out, appends will go to a
-        // cpu local.
-        auto& cl = CacheLocality::system();
-        cpuLocalBuffers_.resize(cl.numCachesByLevel[0]);
-        cpuLocalBuffersReady_.store(true, std::memory_order_release);
-      }
-      return;
-    }
+  auto& which = tls_lastCpuBufferSlot;
+  auto cpuLocalBuf = &cpuLocalBuffers_[which];
+  std::unique_lock<SpinLock> g(cpuLocalBuf->mutex, std::try_to_lock_t());
+  if (!g.owns_lock()) {
+    which = AccessSpreader<>::current(cpuLocalBuffers_.size());
+    cpuLocalBuf = &cpuLocalBuffers_[which];
+    g = std::unique_lock<SpinLock>(cpuLocalBuf->mutex);
   }
-  while (!cpuLocalBuffersReady_.load(std::memory_order_acquire)) {
-  }
-  auto which = AccessSpreader<>::current(cpuLocalBuffers_.size());
-  auto& cpuLocalBuf = cpuLocalBuffers_[which];
-  SpinLockGuard g(cpuLocalBuf.mutex);
-  cpuLocalBuf.buffer.push_back(value);
-  if (cpuLocalBuf.buffer.size() > buffer_.size()) {
-    std::sort(cpuLocalBuf.buffer.begin(), cpuLocalBuf.buffer.end());
-    if (!cpuLocalBuf.digest) {
-      cpuLocalBuf.digest = std::make_unique<DigestT>(digestSize_);
+  cpuLocalBuf->buffer.push_back(value);
+  if (cpuLocalBuf->buffer.size() == bufferSize_) {
+    if (!cpuLocalBuf->digest) {
+      cpuLocalBuf->digest = std::make_unique<DigestT>(digestSize_);
     }
-    *cpuLocalBuf.digest = cpuLocalBuf.digest->merge(cpuLocalBuf.buffer);
-    cpuLocalBuf.buffer.clear();
+    *cpuLocalBuf->digest = cpuLocalBuf->digest->merge(cpuLocalBuf->buffer);
+    cpuLocalBuf->buffer.clear();
   }
 }
 
